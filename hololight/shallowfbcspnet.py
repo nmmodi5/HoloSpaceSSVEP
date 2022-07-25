@@ -1,14 +1,21 @@
-# Note: This whole code was adapted from braindecode ShallowFBCSP
-# https://braindecode.org/
+# Note: This code was adapted from braindecode ShallowFBCSP implementation
+# See https://braindecode.org/ for information on authors/licensing
 
-from dataclasses import dataclass
+import logging
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+import numpy.typing as npt
 
 import torch as th
-import numpy as np
 from torch import nn
 from torch.nn import init
 
-from typing import Optional, Union, Callable, Tuple
+from typing import Optional, Union, Callable, Tuple, Dict, Any
+
+logger = logging.getLogger( __name__ )
 
 def square( x: th.Tensor ) -> th.Tensor:
     return x * x
@@ -100,21 +107,15 @@ def to_dense_prediction_model(
                 new_stride[ ax ] = 1
             module.stride = tuple( new_stride )
 
-def get_output_shape( model: nn.Module, in_chans: int, input_window_samples: int ) -> th.Size:
-    """Returns shape of neural network output for batch size equal 1.
-    Returns
-    -------
-    output_shape: tuple
-        shape of the network output for `batch_size==1` (1, ...)
-    """
+def dummy_output( model: nn.Module, in_chans: int, input_window_samples: int ) -> th.Tensor:
     with th.no_grad():
         dummy_input = th.ones(
             1, in_chans, input_window_samples,
             dtype = next( model.parameters() ).dtype,
             device = next( model.parameters() ).device,
         )
-        output_shape = model( dummy_input ).shape
-    return output_shape
+        output: th.Tensor = model( dummy_input )
+    return output
 
 # do not just use squeeze as we never want to remove first dim
 def _squeeze_final_output( x: th.Tensor ) -> th.Tensor:
@@ -125,13 +126,37 @@ def _squeeze_final_output( x: th.Tensor ) -> th.Tensor:
 def _transpose_time_to_spat( x: th.Tensor ) -> th.Tensor:
     return x.permute( 0, 3, 2, 1 )
 
+class FBCSPDataset( th.utils.data.Dataset ):
+    
+    X: th.Tensor
+    y: th.Tensor
+
+    class_map: Dict[ int, Any ]
+    label_map: Dict[ Any, int ]
+
+    def __init__( self, data: npt.ArrayLike, labels: npt.ArrayLike ) -> None:
+        self.X = th.tensor( data )
+
+        self.class_map = { idx: label for idx, label in enumerate( np.unique( labels ).tolist() ) }
+        self.label_map = { label: idx for idx, label in self.class_map.items() }
+
+        self.y = th.tensor( [ self.label_map[ l ] for l in labels ] )
+        assert self.X.shape[0] == self.y.shape[0]
+
+    def __len__( self ) -> int:
+        return self.X.shape[0]
+
+    def __getitem__( self, idx: int ) -> Tuple[ th.tensor, int ]:  
+        return ( self.X[ idx, ... ], self.y[ idx ] )
+
+
 @dataclass
 class ShallowFBCSPNet:
 
     """
     Shallow ConvNet model from [2]_.
 
-    Input is ( batch x channel x time ) Standardized EEG timeseries ( N(0,1) across window )
+    Input is ( batch x channel x time ) Standardized multichannel timeseries ( N(0,1) across window )
     Output is ( batch x class x time ) log-probabilities
         To get probabilities, recommend np.exp( output ).mean( dim = 2 ).squeeze()
 
@@ -190,7 +215,16 @@ class ShallowFBCSPNet:
     # Seventh step -- Dense layer to output class. No parameters
     # Eighth step -- LogSoftmax - Output to probabilities. No parameters
 
-    def construct( self ) -> th.nn.Module:
+    device: str = 'cpu'
+    _device: th.device = field( init = False )
+    model: th.nn.Module = field( default_factory = nn.Sequential, init = False )
+
+    single_precision: bool = False
+    _dtype: th.dtype = field( init = False )
+
+    def __post_init__( self ) -> None:
+
+        self._dtype = th.float32 if self.single_precision else th.float64
 
         pool_class = dict( 
             max = nn.MaxPool2d, 
@@ -201,59 +235,61 @@ class ShallowFBCSPNet:
             square = square,
             safe_log = safe_log 
         )
-
-        model = nn.Sequential()
         
-        model.add_module( "ensuredims", Ensure4d() )
+        self.model.add_module( "ensuredims", Ensure4d() )
 
         if self.split_first_layer:
-            model.add_module( "dimshuffle", Expression( _transpose_time_to_spat ) )
+            self.model.add_module( "dimshuffle", Expression( _transpose_time_to_spat ) )
 
-            model.add_module( "conv_time", 
+            self.model.add_module( "conv_time", 
                 nn.Conv2d(
                     1,
                     self.n_filters_time,
                     ( self.filter_time_length, 1 ),
                     stride = 1,
+                    dtype = self._dtype
                 ),
             )
-            model.add_module( "conv_spat",
+            self.model.add_module( "conv_spat",
                 nn.Conv2d(
                     self.n_filters_time,
                     self.n_filters_spat,
                     ( 1, self.in_chans ),
                     stride = 1,
                     bias = not self.batch_norm,
+                    dtype = self._dtype
                 ),
             )
             n_filters_conv = self.n_filters_spat
         else:
-            model.add_module( "conv_time",
+            self.model.add_module( "conv_time",
                 nn.Conv2d(
                     self.in_chans,
                     self.n_filters_time,
                     ( self.filter_time_length, 1 ),
                     stride = 1,
                     bias = not self.batch_norm,
+                    dtype = self._dtype
                 ),
             )
             n_filters_conv = self.n_filters_time
 
         if self.batch_norm:
-            model.add_module( "bnorm",
+            self.model.add_module( "bnorm",
                 nn.BatchNorm2d(
                     n_filters_conv, 
                     momentum = self.batch_norm_alpha, 
-                    affine = True
+                    affine = True,
+                    dtype = self._dtype
                 ),
             )
 
         if self.conv_nonlin:
-            model.add_module( "conv_nonlin", Expression( 
+            self.model.add_module( "conv_nonlin", Expression( 
                 nonlin_dict[ self.conv_nonlin ] 
             ) )
 
-        model.add_module( "pool",
+        self.model.add_module( "pool",
             pool_class(
                 kernel_size = ( self.pool_time_length, 1 ),
                 stride = ( self.pool_time_stride, 1 ),
@@ -261,48 +297,73 @@ class ShallowFBCSPNet:
         )
 
         if self.pool_nonlin:
-            model.add_module( "pool_nonlin", Expression( 
+            self.model.add_module( "pool_nonlin", Expression( 
                 nonlin_dict[ self.pool_nonlin ] 
             ) )
 
-        model.add_module( "drop", nn.Dropout( p = self.drop_prob ) )
+        self.model.add_module( "drop", nn.Dropout( p = self.drop_prob ) )
         # model.eval()
 
-        n_out_time = get_output_shape( model, self.in_chans, self.input_time_length )[2]
+        output = dummy_output( self.model, self.in_chans, self.input_time_length )
+        n_out_time = output.shape[2]
         if self.cropped_training: n_out_time = int( n_out_time // 2 )
 
-        model.add_module( "conv_classifier",
+        self.model.add_module( "conv_classifier",
             nn.Conv2d(
                 n_filters_conv,
                 self.n_classes,
                 ( n_out_time, 1 ),
                 bias = True,
+                dtype = self._dtype
             ),
         )
 
-        model.add_module( "softmax", nn.LogSoftmax( dim = 1 ) )
-        model.add_module( "squeeze", Expression( _squeeze_final_output ) )
+        self.model.add_module( "softmax", nn.LogSoftmax( dim = 1 ) )
+        self.model.add_module( "squeeze", Expression( _squeeze_final_output ) )
 
         # Initialization, xavier is same as in paper...
-        init.xavier_uniform_( model.conv_time.weight, gain = 1 )
+        init.xavier_uniform_( self.model.conv_time.weight, gain = 1 )
 
         # maybe no bias in case of no split layer and batch norm
         if self.split_first_layer or ( not self.batch_norm ):
-            init.constant_( model.conv_time.bias, 0 )
+            init.constant_( self.model.conv_time.bias, 0 )
         if self.split_first_layer:
-            init.xavier_uniform_( model.conv_spat.weight, gain = 1 )
+            init.xavier_uniform_( self.model.conv_spat.weight, gain = 1 )
             if not self.batch_norm:
-                init.constant_( model.conv_spat.bias, 0 )
+                init.constant_( self.model.conv_spat.bias, 0 )
         if self.batch_norm:
-            init.constant_( model.bnorm.weight, 1 )
-            init.constant_( model.bnorm.bias, 0 )
-        init.xavier_uniform_( model.conv_classifier.weight, gain = 1 )
-        init.constant_( model.conv_classifier.bias, 0 )
+            init.constant_( self.model.bnorm.weight, 1 )
+            init.constant_( self.model.bnorm.bias, 0 )
+        init.xavier_uniform_( self.model.conv_classifier.weight, gain = 1 )
+        init.constant_( self.model.conv_classifier.bias, 0 )
 
         if self.cropped_training:
-            to_dense_prediction_model( model )
-            len_temporal_receptive_field = get_output_shape( 
-                model, self.in_chans, self.input_time_length )[2]
-            print( len_temporal_receptive_field )
+            to_dense_prediction_model( self.model )
 
-        return model
+        self._device = th.device( self.device )
+        self.model.to( self._device )
+
+    @classmethod
+    def from_checkpoint( cls, checkpoint: Path ) -> "ShallowFBCSPNet":
+        ...
+
+    def save_checkpoint( self, checkpoint: Path ) -> None:
+        ...
+
+    @property
+    def optimal_temporal_stride( self ) -> int:
+        if self.cropped_training:
+            output = dummy_output( 
+                self.model, 
+                self.in_chans, 
+                self.input_time_length 
+            )
+
+            return output.shape[2]
+        else:
+            return self.input_time_length
+
+    def train( self, train: FBCSPDataset, valid: FBCSPDataset ) -> None:
+        """
+        """
+        ...
