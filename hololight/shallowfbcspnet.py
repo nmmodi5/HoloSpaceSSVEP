@@ -12,6 +12,8 @@ import numpy.typing as npt
 import torch as th
 from torch import nn
 from torch.nn import init
+# from torch.optim import Optimizer
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 
 from typing import Optional, Union, Callable, Tuple, Dict, Any
 
@@ -131,14 +133,15 @@ class FBCSPDataset( th.utils.data.Dataset ):
     X: th.Tensor
     y: th.Tensor
 
-    class_map: Dict[ int, Any ]
     label_map: Dict[ Any, int ]
 
     def __init__( self, data: npt.ArrayLike, labels: npt.ArrayLike ) -> None:
         self.X = th.tensor( data )
 
-        self.class_map = { idx: label for idx, label in enumerate( np.unique( labels ).tolist() ) }
-        self.label_map = { label: idx for idx, label in self.class_map.items() }
+        self.label_map = { 
+            label: idx for idx, label in 
+            enumerate( np.unique( labels ).tolist() ) 
+        }
 
         self.y = th.tensor( [ self.label_map[ l ] for l in labels ] )
         assert self.X.shape[0] == self.y.shape[0]
@@ -222,6 +225,8 @@ class ShallowFBCSPNet:
     single_precision: bool = False
     _dtype: th.dtype = field( init = False )
 
+    optimizer: Optional[ th.optim.Optimizer ] = field( default = None, init = False )
+
     def __post_init__( self ) -> None:
 
         self._dtype = th.float32 if self.single_precision else th.float64
@@ -302,7 +307,6 @@ class ShallowFBCSPNet:
             ) )
 
         self.model.add_module( "drop", nn.Dropout( p = self.drop_prob ) )
-        # model.eval()
 
         output = dummy_output( self.model, self.in_chans, self.input_time_length )
         n_out_time = output.shape[2]
@@ -363,7 +367,86 @@ class ShallowFBCSPNet:
         else:
             return self.input_time_length
 
-    def train( self, train: FBCSPDataset, valid: FBCSPDataset ) -> None:
-        """
-        """
-        ...
+    def train( self, train: FBCSPDataset, test: FBCSPDataset ) -> None:
+
+        learning_rate = 0.0001
+        max_epochs = 30
+        batch_size = 32
+        weight_decay = 0.0
+        restart_optimizer = False
+        progress = False
+
+        # model_parameters = filter( lambda p: p.requires_grad, self.model.parameters() )
+        # params = sum( [ np.prod( p.size() ) for p in model_parameters ] )
+        # print( f'Model has {params} trainable parameters' )
+
+        loss_fn = nn.NLLLoss()
+        if self.optimizer is None or restart_optimizer:
+            self.optimizer = th.optim.AdamW( 
+                self.model.parameters(), 
+                lr = learning_rate, 
+                weight_decay = weight_decay 
+            )
+            
+        scheduler = th.optim.lr_scheduler.CosineAnnealingLR( self.optimizer, T_max = max_epochs / 1 )
+
+        train_loss, test_loss, test_accuracy, lr = [], [], [], []
+        epoch_itr = range( max_epochs )
+
+        if progress:
+            try:
+                from tqdm.autonotebook import tqdm
+                epoch_itr = tqdm( epoch_itr )
+            except ImportError:
+                logger.warn( 'Attempted to provide progress bar, tqdm not installed' )
+
+        # Calculate weights for class balancing
+        classes, counts = th.unique( train.y, return_counts = True )
+        weights = { cl.item(): 1.0 / co.item() for cl, co in zip( classes, counts ) }
+        weights = [ weights[ lab.item() ] for lab in train.y ]
+
+        for epoch in epoch_itr:
+
+            self.model.train()
+            train_loss_batches = []
+            for train_feats, train_labels in DataLoader(
+                train,
+                batch_size = batch_size, 
+                # drop_last = True,
+                sampler = WeightedRandomSampler( weights, len( train ), replacement = False ),
+                pin_memory = True,
+            ):
+                pred = self.model( train_feats.to( self._device ) )
+                if self.cropped_training:
+                    pred = pred.mean( axis = 2 )
+                loss = loss_fn( pred, train_labels.to( self._device ) )
+                train_loss_batches.append( loss.cpu().item() )
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+
+            scheduler.step()
+
+            lr.append( scheduler.get_last_lr()[0] )
+            train_loss.append( np.mean( train_loss_batches ) )
+
+            self.model.eval()
+            with th.no_grad():
+                accuracy = 0
+                test_loss_batches = []
+                for test_feats, test_labels in DataLoader(
+                    test, 
+                    batch_size = batch_size, 
+                    pin_memory = True
+                ):
+                    output = self.model( test_feats.to( self._device ) )
+                    if self.cropped_training:
+                        output = output.mean( axis = 2 )
+                    loss = loss_fn( output, test_labels.to( self._device ) )
+                    test_loss_batches.append( loss.cpu().item() )
+                    accuracy += ( output.argmax( axis = 1 ).cpu() == test_labels ).sum().item()
+
+                test_loss.append( np.mean( test_loss_batches ) )
+                test_accuracy.append( accuracy / len( test ) )
+                
