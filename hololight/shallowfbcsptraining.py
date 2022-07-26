@@ -5,7 +5,7 @@ import ezmsg.core as ez
 import numpy as np
 import torch as th
 
-from .shallowfbcspnet import ShallowFBCSPNet
+from .shallowfbcspnet import ShallowFBCSPNet, ShallowFBCSPParameters
 from .sampler import SampleMessage
 
 from typing import AsyncGenerator, List, Optional, Union, Tuple
@@ -13,7 +13,7 @@ from typing import AsyncGenerator, List, Optional, Union, Tuple
 logger = logging.getLogger( __name__ )
 
 class ShallowFBCSPTrainingSettings( ez.Settings ):
-    model_spec: ShallowFBCSPNet
+    model_spec: ShallowFBCSPParameters
 
 class ShallowFBCSPTrainingState( ez.State ):
     samples: List[ SampleMessage ] = field( default_factory = list )
@@ -160,6 +160,8 @@ class ShallowFBCSPTrainingTestSystem( ez.System ):
             ( self.TRAIN_SERVER.OUTPUT_SAMPLETRIGGER, self.SAMPLER.INPUT_TRIGGER ),
 
             # Plotter connections
+            # ( self.EEG.OUTPUT_SIGNAL, self.WINDOW.INPUT_SIGNAL ),
+            # ( self.WINDOW.OUTPUT_SIGNAL, self.PLOTTER.INPUT_SIGNAL ),
             ( self.INJECTOR.OUTPUT_EEG, self.PLOTTER.INPUT_SIGNAL ),
 
             ( self.INJECTOR.OUTPUT_SAMPLE, self.LOGGER.INPUT_MESSAGE ),
@@ -256,7 +258,7 @@ if __name__ == '__main__':
         ),
 
         shallowfbcsptraining_settings = ShallowFBCSPTrainingSettings(
-            model_spec = ShallowFBCSPNet(
+            model_spec = ShallowFBCSPParameters(
                 in_chans = channels,
                 n_classes = 2,
                 input_time_length = 1000

@@ -12,10 +12,9 @@ import numpy.typing as npt
 import torch as th
 from torch import nn
 from torch.nn import init
-# from torch.optim import Optimizer
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler, random_split
 
-from typing import Optional, Union, Callable, Tuple, Dict, Any
+from typing import Optional, Union, Callable, Tuple, Dict, Any, List
 
 logger = logging.getLogger( __name__ )
 
@@ -128,7 +127,7 @@ def _squeeze_final_output( x: th.Tensor ) -> th.Tensor:
 def _transpose_time_to_spat( x: th.Tensor ) -> th.Tensor:
     return x.permute( 0, 3, 2, 1 )
 
-class FBCSPDataset( th.utils.data.Dataset ):
+class FBCSPDataset( Dataset ):
     
     X: th.Tensor
     y: th.Tensor
@@ -154,39 +153,24 @@ class FBCSPDataset( th.utils.data.Dataset ):
 
 
 @dataclass
-class ShallowFBCSPNet:
-
+class ShallowFBCSPParameters:
     """
-    Shallow ConvNet model from [2]_.
-
-    Input is ( batch x channel x time ) Standardized multichannel timeseries ( N(0,1) across window )
-    Output is ( batch x class x time ) log-probabilities
-        To get probabilities, recommend np.exp( output ).mean( dim = 2 ).squeeze()
-
     Default parameters are fine-tuned for EEG classification of spectral modulation
     between 8 and 112 Hz on time-series multi-channel EEG data sampled at ~250 Hz
     Recommend training on 4 second windows (input_time_length = 1000 samples)
 
     If doing "cropped training", inferencing can happen on smaller temporal windows
     If not doing cropped training, inferencing must happen on same window size as training.
-
-    References
-    ----------
-
-    .. [2] Schirrmeister, R. T., Springenberg, J. T., Fiederer, L. D. J.,
-       Glasstetter, M., Eggensperger, K., Tangermann, M., Hutter, F. & Ball, T. (2017).
-       Deep learning with convolutional neural networks for EEG decoding and
-       visualization.
-       Human Brain Mapping , Aug. 2017. Online: http://dx.doi.org/10.1002/hbm.23730
     """
-
     # IO Parameters
     in_chans: int
     n_classes: int
 
     # Training information
     input_time_length: int # samples
-    cropped_training: bool = False
+    single_precision: bool = False # If True, layers use float32 precision, else float64
+    # Cropped training requires changes to the network upon construction (dilation)
+    cropped_training: bool = False # If True, operate on half-sized compute windows
 
     # First step -- Temporal Convolution (think FIR filtering)
     n_filters_time: int = 40
@@ -218,23 +202,46 @@ class ShallowFBCSPNet:
     # Seventh step -- Dense layer to output class. No parameters
     # Eighth step -- LogSoftmax - Output to probabilities. No parameters
 
-    device: str = 'cpu'
-    _device: th.device = field( init = False )
-    model: th.nn.Module = field( default_factory = nn.Sequential, init = False )
+@dataclass
+class EpochInfo:
+    epoch_idx: int
+    train_loss: float
+    test_loss: float
+    test_accuracy: float
+    lr: float
 
-    single_precision: bool = False
-    _dtype: th.dtype = field( init = False )
+class ShallowFBCSPNet:
+    """
+    Shallow ConvNet model from [2]_.
 
-    optimizer: Optional[ th.optim.Optimizer ] = field( default = None, init = False )
+    Input is ( batch (trial) x channel x time ) Standardized multichannel timeseries ( N(0,1) across window )
+    Output is ( batch (trial) x class x time ) log-probabilities
+        To get probabilities, recommend np.exp( output ).mean( dim = 2 ).squeeze()
 
-    def __post_init__( self ) -> None:
+    References
+    ----------
 
-        self._dtype = th.float32 if self.single_precision else th.float64
+    .. [2] Schirrmeister, R. T., Springenberg, J. T., Fiederer, L. D. J.,
+       Glasstetter, M., Eggensperger, K., Tangermann, M., Hutter, F. & Ball, T. (2017).
+       Deep learning with convolutional neural networks for EEG decoding and
+       visualization.
+       Human Brain Mapping , Aug. 2017. Online: http://dx.doi.org/10.1002/hbm.23730
+    """
+
+    params: ShallowFBCSPParameters
+    model: th.nn.Module
+    optimizer: Optional[ th.optim.Optimizer ] = None
+
+    def __init__( self, params: ShallowFBCSPParameters,  ) -> None:
+
+        self.params = params
+
+        dtype = th.float32 if params.single_precision else th.float64
 
         pool_class = dict( 
             max = nn.MaxPool2d, 
             mean = nn.AvgPool2d 
-        )[ self.pool_mode ]
+        )[ params.pool_mode ]
 
         nonlin_dict = dict( 
             square = square,
@@ -243,82 +250,82 @@ class ShallowFBCSPNet:
         
         self.model.add_module( "ensuredims", Ensure4d() )
 
-        if self.split_first_layer:
+        if params.split_first_layer:
             self.model.add_module( "dimshuffle", Expression( _transpose_time_to_spat ) )
 
             self.model.add_module( "conv_time", 
                 nn.Conv2d(
                     1,
-                    self.n_filters_time,
-                    ( self.filter_time_length, 1 ),
+                    params.n_filters_time,
+                    ( params.filter_time_length, 1 ),
                     stride = 1,
-                    dtype = self._dtype
+                    dtype = dtype
                 ),
             )
             self.model.add_module( "conv_spat",
                 nn.Conv2d(
-                    self.n_filters_time,
-                    self.n_filters_spat,
-                    ( 1, self.in_chans ),
+                    params.n_filters_time,
+                    params.n_filters_spat,
+                    ( 1, params.in_chans ),
                     stride = 1,
-                    bias = not self.batch_norm,
-                    dtype = self._dtype
+                    bias = not params.batch_norm,
+                    dtype = dtype
                 ),
             )
-            n_filters_conv = self.n_filters_spat
+            n_filters_conv = params.n_filters_spat
         else:
             self.model.add_module( "conv_time",
                 nn.Conv2d(
-                    self.in_chans,
-                    self.n_filters_time,
-                    ( self.filter_time_length, 1 ),
+                    params.in_chans,
+                    params.n_filters_time,
+                    ( params.filter_time_length, 1 ),
                     stride = 1,
-                    bias = not self.batch_norm,
-                    dtype = self._dtype
+                    bias = not params.batch_norm,
+                    dtype = dtype
                 ),
             )
-            n_filters_conv = self.n_filters_time
+            n_filters_conv = params.n_filters_time
 
-        if self.batch_norm:
+        if params.batch_norm:
             self.model.add_module( "bnorm",
                 nn.BatchNorm2d(
                     n_filters_conv, 
-                    momentum = self.batch_norm_alpha, 
+                    momentum = params.batch_norm_alpha, 
                     affine = True,
-                    dtype = self._dtype
+                    dtype = dtype
                 ),
             )
 
-        if self.conv_nonlin:
+        if params.conv_nonlin:
             self.model.add_module( "conv_nonlin", Expression( 
-                nonlin_dict[ self.conv_nonlin ] 
+                nonlin_dict[ params.conv_nonlin ] 
             ) )
 
         self.model.add_module( "pool",
             pool_class(
-                kernel_size = ( self.pool_time_length, 1 ),
-                stride = ( self.pool_time_stride, 1 ),
+                kernel_size = ( params.pool_time_length, 1 ),
+                stride = ( params.pool_time_stride, 1 ),
             ),
         )
 
-        if self.pool_nonlin:
+        if params.pool_nonlin:
             self.model.add_module( "pool_nonlin", Expression( 
-                nonlin_dict[ self.pool_nonlin ] 
+                nonlin_dict[ params.pool_nonlin ] 
             ) )
 
-        self.model.add_module( "drop", nn.Dropout( p = self.drop_prob ) )
+        self.model.add_module( "drop", nn.Dropout( p = params.drop_prob ) )
 
-        output = dummy_output( self.model, self.in_chans, self.input_time_length )
+        output = dummy_output( self.model, params.in_chans, params.input_time_length )
         n_out_time = output.shape[2]
-        if self.cropped_training: n_out_time = int( n_out_time // 2 )
+        if params.cropped_training: n_out_time = int( n_out_time // 2 )
 
         self.model.add_module( "conv_classifier",
             nn.Conv2d(
                 n_filters_conv,
-                self.n_classes,
+                params.n_classes,
                 ( n_out_time, 1 ),
                 bias = True,
-                dtype = self._dtype
+                dtype = dtype
             ),
         )
 
@@ -329,23 +336,28 @@ class ShallowFBCSPNet:
         init.xavier_uniform_( self.model.conv_time.weight, gain = 1 )
 
         # maybe no bias in case of no split layer and batch norm
-        if self.split_first_layer or ( not self.batch_norm ):
+        if params.split_first_layer or ( not self.batch_norm ):
             init.constant_( self.model.conv_time.bias, 0 )
-        if self.split_first_layer:
+        if params.split_first_layer:
             init.xavier_uniform_( self.model.conv_spat.weight, gain = 1 )
-            if not self.batch_norm:
+            if not params.batch_norm:
                 init.constant_( self.model.conv_spat.bias, 0 )
-        if self.batch_norm:
+        if params.batch_norm:
             init.constant_( self.model.bnorm.weight, 1 )
             init.constant_( self.model.bnorm.bias, 0 )
         init.xavier_uniform_( self.model.conv_classifier.weight, gain = 1 )
         init.constant_( self.model.conv_classifier.bias, 0 )
 
-        if self.cropped_training:
+        if params.cropped_training:
             to_dense_prediction_model( self.model )
 
-        self._device = th.device( self.device )
-        self.model.to( self._device )
+    def __repr__( self ) -> str:
+        rep = super().__repr__()
+        # TODO: Add more here
+        model_parameters = filter( lambda p: p.requires_grad, self.model.parameters() )
+        params = sum( [ np.prod( p.size() ) for p in model_parameters ] )
+        return rep + '\n' + f'Model has {params} trainable parameters'
+
 
     @classmethod
     def from_checkpoint( cls, checkpoint: Path ) -> "ShallowFBCSPNet":
@@ -353,35 +365,67 @@ class ShallowFBCSPNet:
 
     def save_checkpoint( self, checkpoint: Path ) -> None:
         ...
+        # checkpoint = {
+        #     'params: model_definition,
+        #     'fs': trials.fs, 
+        #     'model_state_dict': model.state_dict(),
+        #     'optimizer_state_dict': optimizer.state_dict(),
+        # }
+
+        # out_checkpoint = f'FBCSP.checkpoint'
+        # torch.save( checkpoint, out_checkpoint )
 
     @property
     def optimal_temporal_stride( self ) -> int:
-        if self.cropped_training:
+        """
+        If performing cropped training, it can help to window data using the 
+        "temporal receptive field" of the model.  This property returns the 
+        size of the temporal receptive field in samples, which would be a helpful
+        stride when windowing data for use in training.
+        """
+        if self.params.cropped_training:
             output = dummy_output( 
                 self.model, 
-                self.in_chans, 
-                self.input_time_length 
+                self.params.in_chans, 
+                self.params.input_time_length 
             )
 
             return output.shape[2]
         else:
-            return self.input_time_length
+            return self.params.input_time_length
 
-    def train( self, train: FBCSPDataset, test: FBCSPDataset ) -> None:
+    def train( self, 
+        train_data: Union[ Tuple[ npt.ArrayLike, npt.ArrayLike ], FBCSPDataset ], 
+        test_data: Union[ Tuple[ npt.ArrayLike, npt.ArrayLike ], FBCSPDataset, float ] = 0.2,
+        learning_rate: float = 0.0001,
+        max_epochs: int = 30,
+        batch_size: int = 32,
+        weight_decay: float = 0.0,
+        reset_optimizer: bool = False,
+        progress: bool = False,
+        device_str: str = 'cpu',
+        epoch_callback: Optional[ Callable[ [ EpochInfo ], None ] ] = None
+    ) -> List[ EpochInfo ]:
+        """
+        TODO
+        """
 
-        learning_rate = 0.0001
-        max_epochs = 30
-        batch_size = 32
-        weight_decay = 0.0
-        restart_optimizer = False
-        progress = False
+        if not isinstance( train_data, FBCSPDataset ):
+            train_data = FBCSPDataset( *train_data )
 
-        # model_parameters = filter( lambda p: p.requires_grad, self.model.parameters() )
-        # params = sum( [ np.prod( p.size() ) for p in model_parameters ] )
-        # print( f'Model has {params} trainable parameters' )
+        if isinstance( test_data, float ):
+            train_data, test_data = random_split( 
+                train_data, 
+                ( 1.0 - test_data, test_data ) 
+            )
+        elif not isinstance( test_data, FBCSPDataset ):
+            test_data = FBCSPDataset( *test_data )
+
+        device = th.device( device_str )
+        self.model.to( device )
 
         loss_fn = nn.NLLLoss()
-        if self.optimizer is None or restart_optimizer:
+        if self.optimizer is None or reset_optimizer:
             self.optimizer = th.optim.AdamW( 
                 self.model.parameters(), 
                 lr = learning_rate, 
@@ -390,7 +434,7 @@ class ShallowFBCSPNet:
             
         scheduler = th.optim.lr_scheduler.CosineAnnealingLR( self.optimizer, T_max = max_epochs / 1 )
 
-        train_loss, test_loss, test_accuracy, lr = [], [], [], []
+        training_log: List[ EpochInfo ] = []
         epoch_itr = range( max_epochs )
 
         if progress:
@@ -401,25 +445,24 @@ class ShallowFBCSPNet:
                 logger.warn( 'Attempted to provide progress bar, tqdm not installed' )
 
         # Calculate weights for class balancing
-        classes, counts = th.unique( train.y, return_counts = True )
+        classes, counts = th.unique( train_data.y, return_counts = True )
         weights = { cl.item(): 1.0 / co.item() for cl, co in zip( classes, counts ) }
-        weights = [ weights[ lab.item() ] for lab in train.y ]
+        weights = [ weights[ lab.item() ] for lab in train_data.y ]
 
-        for epoch in epoch_itr:
+        for epoch_idx in epoch_itr:
 
             self.model.train()
             train_loss_batches = []
             for train_feats, train_labels in DataLoader(
-                train,
+                train_data,
                 batch_size = batch_size, 
-                # drop_last = True,
-                sampler = WeightedRandomSampler( weights, len( train ), replacement = False ),
+                sampler = WeightedRandomSampler( weights, len( train_data ), replacement = False ),
                 pin_memory = True,
             ):
-                pred = self.model( train_feats.to( self._device ) )
-                if self.cropped_training:
+                pred = self.model( train_feats.to( device ) )
+                if self.params.cropped_training:
                     pred = pred.mean( axis = 2 )
-                loss = loss_fn( pred, train_labels.to( self._device ) )
+                loss = loss_fn( pred, train_labels.to( device ) )
                 train_loss_batches.append( loss.cpu().item() )
 
                 self.optimizer.zero_grad()
@@ -428,25 +471,34 @@ class ShallowFBCSPNet:
 
             scheduler.step()
 
-            lr.append( scheduler.get_last_lr()[0] )
-            train_loss.append( np.mean( train_loss_batches ) )
-
+            accuracy = 0
+            test_loss_batches = []
             self.model.eval()
             with th.no_grad():
-                accuracy = 0
-                test_loss_batches = []
                 for test_feats, test_labels in DataLoader(
-                    test, 
+                    test_data, 
                     batch_size = batch_size, 
                     pin_memory = True
                 ):
-                    output = self.model( test_feats.to( self._device ) )
-                    if self.cropped_training:
+                    output = self.model( test_feats.to( device ) )
+                    if self.params.cropped_training:
                         output = output.mean( axis = 2 )
-                    loss = loss_fn( output, test_labels.to( self._device ) )
+                    loss = loss_fn( output, test_labels.to( device ) )
                     test_loss_batches.append( loss.cpu().item() )
                     accuracy += ( output.argmax( axis = 1 ).cpu() == test_labels ).sum().item()
 
-                test_loss.append( np.mean( test_loss_batches ) )
-                test_accuracy.append( accuracy / len( test ) )
+            training_log.append( 
+                EpochInfo(
+                    epoch_idx = epoch_idx,
+                    train_loss = np.mean( train_loss_batches ),
+                    test_loss = np.mean( test_loss_batches ),
+                    test_accuracy = accuracy / len( test_data ),
+                    lr = scheduler.get_last_lr()[0]
+                ) 
+            )
+
+            if epoch_callback is not None:
+                epoch_callback( training_log[-1] )
+
+        return training_log
                 
