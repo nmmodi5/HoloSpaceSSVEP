@@ -2,8 +2,9 @@
 # See https://braindecode.org/ for information on authors/licensing
 
 import logging
+import pickle
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +15,7 @@ from torch import nn
 from torch.nn import init
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler, random_split
 
-from typing import Optional, Union, Callable, Tuple, Dict, Any, List
+from typing import Iterable, Optional, Union, Callable, Tuple, Dict, Any, List
 
 logger = logging.getLogger( __name__ )
 
@@ -127,29 +128,46 @@ def _squeeze_final_output( x: th.Tensor ) -> th.Tensor:
 def _transpose_time_to_spat( x: th.Tensor ) -> th.Tensor:
     return x.permute( 0, 3, 2, 1 )
 
+
 class FBCSPDataset( Dataset ):
+    """
+    ShallowFBCSPNet has a built-in training procedure that will only function with 
+    Map Datasets, and requires all trial labels (as integer classes) preloaded
+    in order to perform balanced batching
+    """
     
-    X: th.Tensor
-    y: th.Tensor
+    # An FBCSPDataset always has a preloaded set of class labels
+    classes: List[ int ]
 
-    label_map: Dict[ Any, int ]
-
-    def __init__( self, data: npt.ArrayLike, labels: npt.ArrayLike ) -> None:
-        self.X = th.tensor( data )
-
-        self.label_map = { 
-            label: idx for idx, label in 
-            enumerate( np.unique( labels ).tolist() ) 
-        }
-
-        self.y = th.tensor( [ self.label_map[ l ] for l in labels ] )
-        assert self.X.shape[0] == self.y.shape[0]
+    def __init__( self ) -> None:
+        self.classes = list()
 
     def __len__( self ) -> int:
-        return self.X.shape[0]
+        return len( self.classes )
 
     def __getitem__( self, idx: int ) -> Tuple[ th.tensor, int ]:  
-        return ( self.X[ idx, ... ], self.y[ idx ] )
+        return ( self.get_trial( idx ), self.classes[ idx ] )
+
+    # This interface exists for lazy-loading of the trial data at idx
+    def get_trial( self, idx: int ) -> th.Tensor:
+        raise NotImplementedError
+
+class PreloadedFBCSPDataset( FBCSPDataset ):
+    
+    # A preloaded dataset just stores the data in a tensor
+    data: th.Tensor
+
+    def __init__( self, 
+        data: npt.ArrayLike, 
+        labels: Iterable[ int ] 
+    ) -> None:
+        super().__init__()
+        self.data = th.tensor( data )
+        self.classes = [ int( l ) for l in labels ]
+        assert self.data.shape[0] == len( self.classes )
+
+    def get_trial( self, idx: int ) -> th.Tensor:  
+        return self.data[ idx, ... ]
 
 
 @dataclass
@@ -210,13 +228,14 @@ class EpochInfo:
     test_accuracy: float
     lr: float
 
+@dataclass
+class ShallowFBCSPCheckpoint:
+    params: ShallowFBCSPParameters
+    model_state: Dict[ str, Any ]
+
 class ShallowFBCSPNet:
     """
     Shallow ConvNet model from [2]_.
-
-    Input is ( batch (trial) x channel x time ) Standardized multichannel timeseries ( N(0,1) across window )
-    Output is ( batch (trial) x class x time ) log-probabilities
-        To get probabilities, recommend np.exp( output ).mean( dim = 2 ).squeeze()
 
     References
     ----------
@@ -230,9 +249,13 @@ class ShallowFBCSPNet:
 
     params: ShallowFBCSPParameters
     model: th.nn.Module
-    optimizer: Optional[ th.optim.Optimizer ] = None
 
-    def __init__( self, params: ShallowFBCSPParameters,  ) -> None:
+    def __init__( 
+        self, 
+        params: ShallowFBCSPParameters, 
+        model_state: Optional[ Dict[ str, Any ] ] = None,
+        device_str: str = 'cpu',
+    ) -> None:
 
         self.params = params
 
@@ -248,10 +271,13 @@ class ShallowFBCSPNet:
             safe_log = safe_log 
         )
         
+        self.model = nn.Sequential()
         self.model.add_module( "ensuredims", Ensure4d() )
 
         if params.split_first_layer:
-            self.model.add_module( "dimshuffle", Expression( _transpose_time_to_spat ) )
+            self.model.add_module( "dimshuffle", 
+                Expression( _transpose_time_to_spat ) 
+            )
 
             self.model.add_module( "conv_time", 
                 nn.Conv2d(
@@ -332,24 +358,31 @@ class ShallowFBCSPNet:
         self.model.add_module( "softmax", nn.LogSoftmax( dim = 1 ) )
         self.model.add_module( "squeeze", Expression( _squeeze_final_output ) )
 
-        # Initialization, xavier is same as in paper...
-        init.xavier_uniform_( self.model.conv_time.weight, gain = 1 )
-
-        # maybe no bias in case of no split layer and batch norm
-        if params.split_first_layer or ( not self.batch_norm ):
-            init.constant_( self.model.conv_time.bias, 0 )
-        if params.split_first_layer:
-            init.xavier_uniform_( self.model.conv_spat.weight, gain = 1 )
-            if not params.batch_norm:
-                init.constant_( self.model.conv_spat.bias, 0 )
-        if params.batch_norm:
-            init.constant_( self.model.bnorm.weight, 1 )
-            init.constant_( self.model.bnorm.bias, 0 )
-        init.xavier_uniform_( self.model.conv_classifier.weight, gain = 1 )
-        init.constant_( self.model.conv_classifier.bias, 0 )
-
         if params.cropped_training:
             to_dense_prediction_model( self.model )
+
+        if model_state is None:
+            # Initialization, xavier is same as in paper...
+            init.xavier_uniform_( self.model.conv_time.weight, gain = 1 )
+
+            # maybe no bias in case of no split layer and batch norm
+            if params.split_first_layer or ( not self.batch_norm ):
+                init.constant_( self.model.conv_time.bias, 0 )
+            if params.split_first_layer:
+                init.xavier_uniform_( self.model.conv_spat.weight, gain = 1 )
+                if not params.batch_norm:
+                    init.constant_( self.model.conv_spat.bias, 0 )
+            if params.batch_norm:
+                init.constant_( self.model.bnorm.weight, 1 )
+                init.constant_( self.model.bnorm.bias, 0 )
+            init.xavier_uniform_( self.model.conv_classifier.weight, gain = 1 )
+            init.constant_( self.model.conv_classifier.bias, 0 )
+        else:
+            self.model.load_state_dict( model_state )
+
+        device = th.device( device_str )
+        self.model.to( device )
+
 
     def __repr__( self ) -> str:
         rep = super().__repr__()
@@ -358,22 +391,18 @@ class ShallowFBCSPNet:
         params = sum( [ np.prod( p.size() ) for p in model_parameters ] )
         return rep + '\n' + f'Model has {params} trainable parameters'
 
-
     @classmethod
-    def from_checkpoint( cls, checkpoint: Path ) -> "ShallowFBCSPNet":
-        ...
+    def from_checkpoint_file( cls, checkpoint_file: Path, **kwargs ) -> "ShallowFBCSPNet":
+        with open( checkpoint_file, 'rb' ) as checkpoint_f:
+            obj: ShallowFBCSPCheckpoint = pickle.load( checkpoint_f )
+        cls( params = obj.params, model_state = obj.model_state, **kwargs )
 
-    def save_checkpoint( self, checkpoint: Path ) -> None:
-        ...
-        # checkpoint = {
-        #     'params: model_definition,
-        #     'fs': trials.fs, 
-        #     'model_state_dict': model.state_dict(),
-        #     'optimizer_state_dict': optimizer.state_dict(),
-        # }
-
-        # out_checkpoint = f'FBCSP.checkpoint'
-        # torch.save( checkpoint, out_checkpoint )
+    def save_checkpoint_file( self, checkpoint_file: Path ) -> None:
+        with open( checkpoint_file, 'wb' ) as checkpoint_f:
+            pickle.dump( ShallowFBCSPCheckpoint(
+                params = self.params,
+                model_state = self.model.state_dict()
+            ), checkpoint_f )
 
     @property
     def optimal_temporal_stride( self ) -> int:
@@ -394,45 +423,39 @@ class ShallowFBCSPNet:
         else:
             return self.params.input_time_length
 
-    def train( self, 
-        train_data: Union[ Tuple[ npt.ArrayLike, npt.ArrayLike ], FBCSPDataset ], 
-        test_data: Union[ Tuple[ npt.ArrayLike, npt.ArrayLike ], FBCSPDataset, float ] = 0.2,
+    def train( 
+        self, 
+        train_data: Union[ Tuple[ npt.ArrayLike, Iterable[ int ] ], FBCSPDataset ], 
+        test_data: Union[ Tuple[ npt.ArrayLike, Iterable[ int ] ], FBCSPDataset ],
         learning_rate: float = 0.0001,
         max_epochs: int = 30,
         batch_size: int = 32,
         weight_decay: float = 0.0,
-        reset_optimizer: bool = False,
         progress: bool = False,
-        device_str: str = 'cpu',
         epoch_callback: Optional[ Callable[ [ EpochInfo ], None ] ] = None
     ) -> List[ EpochInfo ]:
         """
-        TODO
+        Input is ( batch (trial) x channel x time ) Standardized multichannel timeseries ( N(0,1) across window )
         """
 
         if not isinstance( train_data, FBCSPDataset ):
-            train_data = FBCSPDataset( *train_data )
+            train_data = PreloadedFBCSPDataset( *train_data )
 
-        if isinstance( test_data, float ):
-            train_data, test_data = random_split( 
-                train_data, 
-                ( 1.0 - test_data, test_data ) 
-            )
-        elif not isinstance( test_data, FBCSPDataset ):
-            test_data = FBCSPDataset( *test_data )
+        if not isinstance( test_data, FBCSPDataset ):
+            test_data = PreloadedFBCSPDataset( *test_data )
 
-        device = th.device( device_str )
-        self.model.to( device )
+        device = next( self.model.parameters() ).device
 
         loss_fn = nn.NLLLoss()
-        if self.optimizer is None or reset_optimizer:
-            self.optimizer = th.optim.AdamW( 
-                self.model.parameters(), 
-                lr = learning_rate, 
-                weight_decay = weight_decay 
-            )
+        optimizer = th.optim.AdamW( 
+            self.model.parameters(), 
+            lr = learning_rate, 
+            weight_decay = weight_decay 
+        )
             
-        scheduler = th.optim.lr_scheduler.CosineAnnealingLR( self.optimizer, T_max = max_epochs / 1 )
+        scheduler = th.optim.lr_scheduler.CosineAnnealingLR( 
+            optimizer, T_max = max_epochs / 1 
+        )
 
         training_log: List[ EpochInfo ] = []
         epoch_itr = range( max_epochs )
@@ -445,9 +468,9 @@ class ShallowFBCSPNet:
                 logger.warn( 'Attempted to provide progress bar, tqdm not installed' )
 
         # Calculate weights for class balancing
-        classes, counts = th.unique( train_data.y, return_counts = True )
+        classes, counts = np.unique( train_data.classes, return_counts = True )
         weights = { cl.item(): 1.0 / co.item() for cl, co in zip( classes, counts ) }
-        weights = [ weights[ lab.item() ] for lab in train_data.y ]
+        weights = [ weights[ lab ] for lab in train_data.classes ]
 
         for epoch_idx in epoch_itr:
 
@@ -459,15 +482,15 @@ class ShallowFBCSPNet:
                 sampler = WeightedRandomSampler( weights, len( train_data ), replacement = False ),
                 pin_memory = True,
             ):
-                pred = self.model( train_feats.to( device ) )
+                pred: th.Tensor = self.model( train_feats.to( device ) )
                 if self.params.cropped_training:
                     pred = pred.mean( axis = 2 )
-                loss = loss_fn( pred, train_labels.to( device ) )
+                loss: th.Tensor = loss_fn( pred, train_labels.to( device ) )
                 train_loss_batches.append( loss.cpu().item() )
 
-                self.optimizer.zero_grad()
+                optimizer.zero_grad()
                 loss.backward()
-                self.optimizer.step()
+                optimizer.step()
 
             scheduler.step()
 
@@ -480,10 +503,10 @@ class ShallowFBCSPNet:
                     batch_size = batch_size, 
                     pin_memory = True
                 ):
-                    output = self.model( test_feats.to( device ) )
+                    output: th.Tensor = self.model( test_feats.to( device ) )
                     if self.params.cropped_training:
                         output = output.mean( axis = 2 )
-                    loss = loss_fn( output, test_labels.to( device ) )
+                    loss: th.Tensor = loss_fn( output, test_labels.to( device ) )
                     test_loss_batches.append( loss.cpu().item() )
                     accuracy += ( output.argmax( axis = 1 ).cpu() == test_labels ).sum().item()
 
@@ -500,5 +523,43 @@ class ShallowFBCSPNet:
             if epoch_callback is not None:
                 epoch_callback( training_log[-1] )
 
+        self.model.cpu()
         return training_log
+
+    def inference( self, data: npt.ArrayLike, probs: bool = True ) -> np.ndarray:
+        """
+        Input is ( batch (trial) x channel x time ) Standardized multichannel timeseries ( N(0,1) across window )
+            * If data.shape == 2, data is assumed to be channel x time input, and will automatically be converted
+            to a 1 x channel x time array for inferencing.
+
+        Output is ( batch (trial) x class ) probabilities.
+            If probs = False, output is log-probabilities
+        """
+        data_input = th.tensor( data )
+        if len( data_input.shape ) == 2:
+            # Assume we put in a single trial of data
+            data_input = data_input[ None, ... ]
+
+        # n_trials, n_ch, n_time = data_input.shape
+
+        device = next( self.model.parameters() ).device
+
+        self.model.eval()
+        with th.no_grad():
+            output: th.Tensor = self.model( data_input.to( device ) )
+            if probs: output = output.exp()
+            
+            # If we did cropped training, we might get multiple time outputs
+            # collapse across time dimension here
+            output = output.mean( axis = 2 )
+
+        output = output.cpu().numpy()
+
+        return output
+            
+
+        
+
+
+
                 
