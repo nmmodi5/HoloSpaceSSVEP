@@ -2,6 +2,7 @@
 # See https://braindecode.org/ for information on authors/licensing
 
 import logging
+from multiprocessing import dummy
 import pickle
 
 from dataclasses import dataclass
@@ -386,10 +387,21 @@ class ShallowFBCSPNet:
 
     def __repr__( self ) -> str:
         rep = super().__repr__()
-        # TODO: Add more here
+        model_rep = f'Model: {self.model.__repr__()}'
         model_parameters = filter( lambda p: p.requires_grad, self.model.parameters() )
         params = sum( [ np.prod( p.size() ) for p in model_parameters ] )
-        return rep + '\n' + f'Model has {params} trainable parameters'
+        example_param = next( self.model.parameters() )
+        device = example_param.device
+        dtype = example_param.dtype
+        param_rep = f'Model has {params} trainable parameters on device: {device}'
+        if self.params.cropped_training:
+            param_rep = param_rep + ' (cropped training)'
+        stride_rep = f'When segmenting temporal windows -- use optimal temporal stride of {self.optimal_temporal_stride} samples'
+        in_rep = f'Model input: ( batch x {self.params.in_chans} ch x ' + \
+            f'{self.params.input_time_length} time points, {dtype=} )'
+        out = dummy_output( self.model, self.params.in_chans, self.params.input_time_length )
+        out_rep = f'Model output: ( batch x {out.shape[1]} classes x {out.shape[2]} crops, dtype={out.dtype} )'
+        return '\n'.join( [ rep, model_rep, param_rep, stride_rep, in_rep, out_rep ] )
 
     @classmethod
     def from_checkpoint_file( cls, checkpoint_file: Path, **kwargs ) -> "ShallowFBCSPNet":
