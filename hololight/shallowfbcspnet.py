@@ -598,7 +598,7 @@ class ShallowFBCSPNet:
     def confusion( self, dataset: Union[ Tuple[ npt.ArrayLike, Iterable[ int ] ], Dataset ] ) -> np.ndarray:
         dataset = ensure_dataset( dataset )
 
-        test_feats, test_labels = dataset[:]
+        test_feats, test_labels = next( iter( DataLoader( dataset, batch_size = len( dataset ) ) ) )
         decode = self.inference( test_feats ).argmax( axis = 1 )
 
         classes = np.unique( test_labels )
