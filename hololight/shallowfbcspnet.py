@@ -2,7 +2,6 @@
 # See https://braindecode.org/ for information on authors/licensing
 
 import logging
-from multiprocessing import dummy
 import pickle
 
 from dataclasses import dataclass
@@ -14,7 +13,13 @@ import numpy.typing as npt
 import torch as th
 from torch import nn
 from torch.nn import init
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler, random_split
+from torch.utils.data import (
+    Dataset, 
+    IterableDataset,
+    DataLoader, 
+    TensorDataset,
+    Subset
+)
 
 from typing import Iterable, Optional, Union, Callable, Tuple, Dict, Any, List
 
@@ -129,46 +134,60 @@ def _squeeze_final_output( x: th.Tensor ) -> th.Tensor:
 def _transpose_time_to_spat( x: th.Tensor ) -> th.Tensor:
     return x.permute( 0, 3, 2, 1 )
 
+def ensure_dataset( dataset: Union[ Tuple[ npt.ArrayLike, Iterable[ int ] ], Dataset ] ) -> Dataset:
+    if not isinstance( dataset, Dataset ):
+        dataset = TensorDataset( th.tensor( dataset[0] ), th.tensor( dataset[1] ) )
+    return dataset
 
-class FBCSPDataset( Dataset ):
+def balance_dataset( 
+    dataset: Union[ Tuple[ npt.ArrayLike, Iterable[ int ] ], Dataset ], 
+    ratios: Optional[ Iterable[ float ] ] = None, 
+    drop_extra: bool = True,
+    shuffle: bool = True,
+    generator: Optional[ np.random.Generator ] = None
+) -> Union[ Dataset, Tuple[ Dataset, ... ] ]:
     """
-    ShallowFBCSPNet has a built-in training procedure that will only function with 
-    Map Datasets, and requires all trial labels (as integer classes) preloaded
-    in order to perform balanced batching
+    If no split ratios are defined, and drop_extra is True,
+    this function balances dataset by class examples
     """
-    
-    # An FBCSPDataset always has a preloaded set of class labels
-    classes: List[ int ]
 
-    def __init__( self ) -> None:
-        self.classes = list()
+    if ratios is None: ratios = [ 1.0 ]
+    ratios: List[ float ] = [ 0.0 ] + [ v for v in ratios ]
+    if not np.allclose( np.sum( ratios ), 1.0 ):
+        raise ValueError( "Values in ratios must sum to 1.0" )
 
-    def __len__( self ) -> int:
-        return len( self.classes )
+    dataset = ensure_dataset( dataset )
 
-    def __getitem__( self, idx: int ) -> Tuple[ th.tensor, int ]:  
-        return ( self.get_trial( idx ), self.classes[ idx ] )
+    if isinstance( dataset, IterableDataset ):
+        raise ValueError( "Cannot split iterable dataset" )
 
-    # This interface exists for lazy-loading of the trial data at idx
-    def get_trial( self, idx: int ) -> th.Tensor:
-        raise NotImplementedError
+    labels = np.array( [ label for _, label in dataset ] )
+    classes, counts = np.unique( labels, return_counts = True )
+    min_class_count = np.min( counts )
 
-class PreloadedFBCSPDataset( FBCSPDataset ):
-    
-    # A preloaded dataset just stores the data in a tensor
-    data: th.Tensor
+    class_indices = [ np.where( labels == cl )[0] for cl in classes ]
 
-    def __init__( self, 
-        data: npt.ArrayLike, 
-        labels: Iterable[ int ] 
-    ) -> None:
-        super().__init__()
-        self.data = th.tensor( data )
-        self.classes = [ int( l ) for l in labels ]
-        assert self.data.shape[0] == len( self.classes )
+    if shuffle:
+        if generator is None:
+            generator = np.random.default_rng()
+        for index_arr in class_indices:
+            generator.shuffle( index_arr )
 
-    def get_trial( self, idx: int ) -> th.Tensor:  
-        return self.data[ idx, ... ]
+    class_indices = np.array( [ arr[:min_class_count] for arr in class_indices ] )
+    extra_indices = np.array( [ arr[min_class_count:] for arr in class_indices ] ).flatten()
+
+    bounds = np.cumsum( ratios ) * min_class_count
+    bounds[-1] = min_class_count # account for round-off error
+    bounds = bounds.round().astype( int )
+    bounds = [ slice( *bound ) for bound in zip( bounds[:-1], bounds[1:] ) ]
+
+    group_membership = [ class_indices[ :, bound ].flatten() for bound in bounds ]
+
+    if not drop_extra:
+        group_membership[-1] = np.concatenate( [ group_membership[-1], extra_indices ] )
+
+    outputs = [ Subset( dataset, np.sort( indices ) ) for indices in group_membership ]
+    return tuple( outputs ) if len( outputs ) > 1 else outputs[0]
 
 
 @dataclass
@@ -384,7 +403,6 @@ class ShallowFBCSPNet:
         device = th.device( device_str )
         self.model.to( device )
 
-
     def __repr__( self ) -> str:
         rep = super().__repr__()
         model_rep = f'Model: {self.model.__repr__()}'
@@ -437,24 +455,34 @@ class ShallowFBCSPNet:
 
     def train( 
         self, 
-        train_data: Union[ Tuple[ npt.ArrayLike, Iterable[ int ] ], FBCSPDataset ], 
-        test_data: Union[ Tuple[ npt.ArrayLike, Iterable[ int ] ], FBCSPDataset ],
+        train_data: Union[ Tuple[ npt.ArrayLike, Iterable[ int ] ], Dataset ], 
+        test_data: Union[ Tuple[ npt.ArrayLike, Iterable[ int ] ], Dataset, float ],
+        balance_datasets: bool = True,
         learning_rate: float = 0.0001,
         max_epochs: int = 30,
         batch_size: int = 32,
         weight_decay: float = 0.0,
         progress: bool = False,
-        epoch_callback: Optional[ Callable[ [ EpochInfo ], None ] ] = None
+        epoch_callback: Optional[ Callable[ [ EpochInfo ], None ] ] = None,
+        pin_memory: bool = False
     ) -> List[ EpochInfo ]:
         """
         Input is ( batch (trial) x channel x time ) Standardized multichannel timeseries ( N(0,1) across window )
         """
 
-        if not isinstance( train_data, FBCSPDataset ):
-            train_data = PreloadedFBCSPDataset( *train_data )
+        train_data = ensure_dataset( train_data )
 
-        if not isinstance( test_data, FBCSPDataset ):
-            test_data = PreloadedFBCSPDataset( *test_data )
+        # Make sure test data is a dataset
+        if isinstance( test_data, float ):
+            ratios = ( 1.0 - test_data, test_data )
+            train_data, test_data = balance_dataset( train_data, ratios, drop_extra = False )
+        elif not isinstance( test_data, Dataset ):
+            test_data = ensure_dataset( train_data )
+
+        # Rebalance subsets
+        if balance_datasets:
+            train_data = balance_dataset( train_data )
+            test_data = balance_dataset( test_data )
 
         device = next( self.model.parameters() ).device
 
@@ -480,9 +508,13 @@ class ShallowFBCSPNet:
                 logger.warn( 'Attempted to provide progress bar, tqdm not installed' )
 
         # Calculate weights for class balancing
-        classes, counts = np.unique( train_data.classes, return_counts = True )
-        weights = { cl.item(): 1.0 / co.item() for cl, co in zip( classes, counts ) }
-        weights = [ weights[ lab ] for lab in train_data.classes ]
+        # sampler = None
+        # if not isinstance( train_data, IterableDataset ):
+        #     labels = np.array( [ label for _, label in train_data ] )
+        #     classes, counts = np.unique( labels, return_counts = True )
+        #     weights = { cl.item(): 1.0 / co.item() for cl, co in zip( classes, counts ) }
+        #     weights = [ weights[ label ] for label in labels ]
+        #     sampler = WeightedRandomSampler( weights, len( train_data ), replacement = False )
 
         for epoch_idx in epoch_itr:
 
@@ -491,12 +523,11 @@ class ShallowFBCSPNet:
             for train_feats, train_labels in DataLoader(
                 train_data,
                 batch_size = batch_size, 
-                sampler = WeightedRandomSampler( weights, len( train_data ), replacement = False ),
-                pin_memory = True,
+                # sampler = sampler,
+                pin_memory = pin_memory,
             ):
                 pred: th.Tensor = self.model( train_feats.to( device ) )
-                if self.params.cropped_training:
-                    pred = pred.mean( axis = 2 )
+                pred = pred.mean( axis = 2 )
                 loss: th.Tensor = loss_fn( pred, train_labels.to( device ) )
                 train_loss_batches.append( loss.cpu().item() )
 
@@ -513,11 +544,10 @@ class ShallowFBCSPNet:
                 for test_feats, test_labels in DataLoader(
                     test_data, 
                     batch_size = batch_size, 
-                    pin_memory = True
+                    pin_memory = pin_memory
                 ):
                     output: th.Tensor = self.model( test_feats.to( device ) )
-                    if self.params.cropped_training:
-                        output = output.mean( axis = 2 )
+                    output = output.mean( axis = 2 )
                     loss: th.Tensor = loss_fn( output, test_labels.to( device ) )
                     test_loss_batches.append( loss.cpu().item() )
                     accuracy += ( output.argmax( axis = 1 ).cpu() == test_labels ).sum().item()
@@ -538,7 +568,7 @@ class ShallowFBCSPNet:
         self.model.cpu()
         return training_log
 
-    def inference( self, data: npt.ArrayLike, probs: bool = True ) -> np.ndarray:
+    def inference( self, data: Union[ npt.ArrayLike, th.Tensor ], probs: bool = True ) -> np.ndarray:
         """
         Input is ( batch (trial) x channel x time ) Standardized multichannel timeseries ( N(0,1) across window )
             * If data.shape == 2, data is assumed to be channel x time input, and will automatically be converted
@@ -547,31 +577,81 @@ class ShallowFBCSPNet:
         Output is ( batch (trial) x class ) probabilities.
             If probs = False, output is log-probabilities
         """
-        data_input = th.tensor( data )
-        if len( data_input.shape ) == 2:
-            # Assume we put in a single trial of data
-            data_input = data_input[ None, ... ]
-
-        # n_trials, n_ch, n_time = data_input.shape
+        if not isinstance( data, th.Tensor ):
+            data = th.tensor( data )
+        if len( data.shape ) == 2:
+            # Assume we put in a single "trial" of data
+            data = data[ None, ... ]
 
         device = next( self.model.parameters() ).device
 
         self.model.eval()
         with th.no_grad():
-            output: th.Tensor = self.model( data_input.to( device ) )
+            output: th.Tensor = self.model( data.to( device ) )
             if probs: output = output.exp()
-            
-            # If we did cropped training, we might get multiple time outputs
-            # collapse across time dimension here
             output = output.mean( axis = 2 )
 
         output = output.cpu().numpy()
 
         return output
-            
 
+    def confusion( self, dataset: Union[ Tuple[ npt.ArrayLike, Iterable[ int ] ], Dataset ] ) -> np.ndarray:
+        dataset = ensure_dataset( dataset )
+
+        test_feats, test_labels = dataset[:]
+        decode = self.inference( test_feats ).argmax( axis = 1 )
+
+        classes = np.unique( test_labels )
+        confusion = np.zeros( ( len( classes ), len( classes ) ) )
+
+        for true_idx, true_class in enumerate( classes ):
+            class_trials = np.where( np.array( test_labels ) == true_class )[0]
+            for pred_idx, pred_class in enumerate( classes ):
+                num_preds = ( decode[ class_trials ] == pred_class ).sum().item()
+                confusion[ true_idx, pred_idx ] = num_preds / len( class_trials )
         
+        return confusion
 
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.axes import Axes
 
+    def plot_train_info_mpl( train_info: List[ EpochInfo ], ax: Axes ) -> None:
+        ax.plot( [ e.train_loss for e in train_info ], label = 'Train' )
+        ax.plot( [ e.test_loss for e in train_info ], label = 'Test' )
+        ax.plot( [ e.test_accuracy for e in train_info ], label = 'Test Accuracy' )
+        ax.plot( [ e.lr for e in train_info ], label = 'Learning Rate' )
+        ax.legend()
+        ax.set_yscale( 'log' )
+        ax.set_xlabel( 'Epoch' )
+        ax.axhline( 1, color = 'k' )
+        ax.set_title( 'Training Curves' )
 
-                
+    def plot_confusion_mpl( confusion: np.ndarray, ax: Axes, add_colorbar: bool = True ) -> None:
+        n_classes = confusion.shape[0]
+
+        corners = np.arange( n_classes + 1 ) - 0.5
+        im = ax.pcolormesh( 
+            corners, corners, confusion, alpha = 0.5,
+            cmap = plt.cm.Blues, vmin = 0.0, vmax = 1.0
+        )
+
+        for row_idx, row in enumerate( confusion ):
+            for col_idx, freq in enumerate( row ):
+                ax.annotate( 
+                    f'{freq:0.2f}', ( col_idx, row_idx ), 
+                    ha = 'center', va = 'center' 
+                )
+
+        ax.set_aspect( 'equal' )
+        ax.set_xticks( np.arange( n_classes ) )
+        ax.set_yticks( np.arange( n_classes ) )
+        ax.set_ylabel( 'True Class' )
+        ax.set_xlabel( 'Predicted Class' )
+        ax.invert_yaxis()
+        if add_colorbar: 
+            ax.get_figure().colorbar( im )
+        ax.set_title( 'Classifier Confusion' )
+
+except ImportError:
+    pass         
