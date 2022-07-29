@@ -1,32 +1,72 @@
 from dataclasses import field, replace
+
+import io
 import logging
+import json
 
 import ezmsg.core as ez
+from ezmsg.util.messagelogger import MessageDecoder
+
 import numpy as np
+
 import torch as th
+from torch.utils.data import Dataset, ConcatDataset
 
 from .shallowfbcspnet import ShallowFBCSPNet, ShallowFBCSPParameters
 from .sampler import SampleMessage
 
-from typing import AsyncGenerator, List, Optional, Union, Tuple
+from typing import AsyncGenerator, List, Optional, Tuple, Any
 
 logger = logging.getLogger( __name__ )
 
+class FBCSPDataset( Dataset ):
+    """
+    Lazy loaded dataset from disk
+    """
+    file: io.TextIOWrapper
+
+    seekpoints: List[ int ]
+    labels: List[ int ]
+
+    dtype: np.dtype
+
+    def __init__( self, filename: Path, single_precision: bool = True ) -> None:
+        super().__init__()
+
+        self.dtype = np.float32 if single_precision else np.float64
+        self.seekpoints = list()
+        self.file = open( filename, 'r' )   
+        self.labels = []     
+        while self.file.readable():
+            seekpoint = self.file.tell()
+            line = self.file.readline()
+            if len( line ):
+                self.seekpoints.append( seekpoint )
+                obj = json.loads( line, cls = MessageDecoder )
+                self.labels.append( int( obj[ 'trigger' ][ 'value' ] ) )
+            else: break
+
+    def __len__( self ) -> int:
+        return len( self.labels )
+
+    def __getitem__( self, idx: int ) -> Tuple[ th.Tensor, th.Tensor ]:
+        self.file.seek( self.seekpoints[ idx ] )
+        obj = json.loads( self.file.readline(), cls = MessageDecoder )
+        data = np.transpose( obj[ 'sample' ][ 'data' ] ).astype( self.dtype )
+        return th.tensor( data ), th.tensor( self.labels[ idx ] )
+
+    def __del__( self ):
+        self.file.close()
+
 class ShallowFBCSPTrainingSettings( ez.Settings ):
-    model_spec: ShallowFBCSPParameters
+    session_dir: Path
 
 class ShallowFBCSPTrainingState( ez.State ):
-    samples: List[ SampleMessage ] = field( default_factory = list )
+    ...
 
 class ShallowFBCSPTraining( ez.Unit ):
     SETTINGS: ShallowFBCSPTrainingSettings
     STATE: ShallowFBCSPTrainingState
-
-    INPUT_SAMPLE = ez.InputStream( SampleMessage )
-
-    @ez.subscriber( INPUT_SAMPLE )
-    async def on_sample( self, msg: SampleMessage ) -> None:
-        self.STATE.samples.append( msg )
 
 
 # Dev/Test Fixture

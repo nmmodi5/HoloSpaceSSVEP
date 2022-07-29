@@ -1,10 +1,10 @@
-# Note: This code was adapted from braindecode ShallowFBCSP implementation
+# Note: Some of this code was adapted from braindecode ShallowFBCSP implementation
 # See https://braindecode.org/ for information on authors/licensing
 
 import logging
 import pickle
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -242,11 +242,91 @@ class ShallowFBCSPParameters:
 
 @dataclass
 class EpochInfo:
-    epoch_idx: int
     train_loss: float
     test_loss: float
     test_accuracy: float
     lr: float
+
+@dataclass
+class ShallowFBCSPTrainingParameters:
+    learning_rate: float = 0.0001
+    annealing_epochs: int = 30
+    batch_size: int = 32
+    weight_decay: float = 0.0
+    pin_memory: bool = False
+    loss_fn: nn.Module = field( default_factory = nn.NLLLoss )
+
+@dataclass
+class ShallowFBCSPTraining:
+    model: nn.Module
+    train: Dataset
+    test: Dataset
+
+    params: ShallowFBCSPTrainingParameters = field(
+        default_factory = ShallowFBCSPTrainingParameters
+    )
+
+    device: th.device = field( init = False )
+    optimizer: th.optim.Optimizer = field( init = False )
+    scheduler: th.optim.lr_scheduler._LRScheduler = field( init = False )
+
+    def __post_init__( self ):
+
+        self.device = next( self.model.parameters() ).device
+
+        self.optimizer = th.optim.AdamW( 
+            self.model.parameters(), 
+            lr = self.params.learning_rate, 
+            weight_decay = self.params.weight_decay 
+        )
+            
+        self.scheduler = th.optim.lr_scheduler.CosineAnnealingLR( 
+            self.optimizer, T_max = self.params.annealing_epochs / 1 
+        )
+
+    def run_epoch( self ) -> EpochInfo:
+
+        self.model.train()
+        train_loss_batches = []
+        for train_feats, train_labels in DataLoader(
+            self.train,
+            batch_size = self.params.batch_size, 
+            pin_memory = self.params.pin_memory,
+        ):
+            pred: th.Tensor = self.model( train_feats.to( self.device ) )
+            pred = pred.mean( axis = 2 )
+            loss: th.Tensor = self.params.loss_fn( pred, train_labels.to( self.device ) )
+            train_loss_batches.append( loss.cpu().item() )
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+        self.scheduler.step()
+
+        accuracy = 0
+        test_loss_batches = []
+        self.model.eval()
+        with th.no_grad():
+            for test_feats, test_labels in DataLoader(
+                self.test, 
+                batch_size = self.params.batch_size, 
+                pin_memory = self.params.pin_memory
+            ):
+                output: th.Tensor = self.model( test_feats.to( self.device ) )
+                output = output.mean( axis = 2 )
+                loss: th.Tensor = self.params.loss_fn( output, test_labels.to( self.device ) )
+                test_loss_batches.append( loss.cpu().item() )
+                accuracy += ( output.argmax( axis = 1 ).cpu() == test_labels ).sum().item()
+
+        info = EpochInfo(
+            train_loss = np.mean( train_loss_batches ),
+            test_loss = np.mean( test_loss_batches ),
+            test_accuracy = accuracy / len( self.test ),
+            lr = self.scheduler.get_last_lr()[0]
+        ) 
+
+        return info
 
 @dataclass
 class ShallowFBCSPCheckpoint:
@@ -381,27 +461,31 @@ class ShallowFBCSPNet:
         if params.cropped_training:
             to_dense_prediction_model( self.model )
 
-        if model_state is None:
-            # Initialization, xavier is same as in paper...
-            init.xavier_uniform_( self.model.conv_time.weight, gain = 1 )
-
-            # maybe no bias in case of no split layer and batch norm
-            if params.split_first_layer or ( not self.batch_norm ):
-                init.constant_( self.model.conv_time.bias, 0 )
-            if params.split_first_layer:
-                init.xavier_uniform_( self.model.conv_spat.weight, gain = 1 )
-                if not params.batch_norm:
-                    init.constant_( self.model.conv_spat.bias, 0 )
-            if params.batch_norm:
-                init.constant_( self.model.bnorm.weight, 1 )
-                init.constant_( self.model.bnorm.bias, 0 )
-            init.xavier_uniform_( self.model.conv_classifier.weight, gain = 1 )
-            init.constant_( self.model.conv_classifier.bias, 0 )
-        else:
-            self.model.load_state_dict( model_state )
+        if model_state is None: self.reset_model()
+        else: self.model.load_state_dict( model_state )
 
         device = th.device( device_str )
         self.model.to( device )
+
+    def reset_model( self ) -> None:
+        """
+        (Re)Initialize model weights to appropriate starting values
+        """
+        # Initialization, xavier is same as in paper...
+        init.xavier_uniform_( self.model.conv_time.weight, gain = 1 )
+
+        # maybe no bias in case of no split layer and batch norm
+        if self.params.split_first_layer or ( not self.batch_norm ):
+            init.constant_( self.model.conv_time.bias, 0 )
+        if self.params.split_first_layer:
+            init.xavier_uniform_( self.model.conv_spat.weight, gain = 1 )
+            if not self.params.batch_norm:
+                init.constant_( self.model.conv_spat.bias, 0 )
+        if self.params.batch_norm:
+            init.constant_( self.model.bnorm.weight, 1 )
+            init.constant_( self.model.bnorm.bias, 0 )
+        init.xavier_uniform_( self.model.conv_classifier.weight, gain = 1 )
+        init.constant_( self.model.conv_classifier.bias, 0 )
 
     def __repr__( self ) -> str:
         rep = super().__repr__()
@@ -424,15 +508,23 @@ class ShallowFBCSPNet:
     @classmethod
     def from_checkpoint_file( cls, checkpoint_file: Path, **kwargs ) -> "ShallowFBCSPNet":
         with open( checkpoint_file, 'rb' ) as checkpoint_f:
-            obj: ShallowFBCSPCheckpoint = pickle.load( checkpoint_f )
-        cls( params = obj.params, model_state = obj.model_state, **kwargs )
+            checkpoint: ShallowFBCSPCheckpoint = pickle.load( checkpoint_f )
+        return cls.from_checkpoint( checkpoint, **kwargs )
+        
+    @classmethod
+    def from_checkpoint( cls, checkpoint: ShallowFBCSPCheckpoint, **kwargs ) -> "ShallowFBCSPNet":
+        return cls( params = checkpoint.params, model_state = checkpoint.model_state, **kwargs )
 
     def save_checkpoint_file( self, checkpoint_file: Path ) -> None:
         with open( checkpoint_file, 'wb' ) as checkpoint_f:
-            pickle.dump( ShallowFBCSPCheckpoint(
-                params = self.params,
-                model_state = self.model.state_dict()
-            ), checkpoint_f )
+            pickle.dump( self.checkpoint, checkpoint_f )
+
+    @property
+    def checkpoint( self ) -> ShallowFBCSPCheckpoint:
+        return ShallowFBCSPCheckpoint(
+            params = self.params,
+            model_state = self.model.state_dict()
+        )
 
     @property
     def optimal_temporal_stride( self ) -> int:
@@ -457,14 +549,11 @@ class ShallowFBCSPNet:
         self, 
         train_data: Union[ Tuple[ npt.ArrayLike, Iterable[ int ] ], Dataset ], 
         test_data: Union[ Tuple[ npt.ArrayLike, Iterable[ int ] ], Dataset, float ],
-        balance_datasets: bool = True,
-        learning_rate: float = 0.0001,
+        training_params: Optional[ ShallowFBCSPTrainingParameters ] = None,
         max_epochs: int = 30,
-        batch_size: int = 32,
-        weight_decay: float = 0.0,
+        balance_datasets: bool = True,
         progress: bool = False,
         epoch_callback: Optional[ Callable[ [ EpochInfo ], None ] ] = None,
-        pin_memory: bool = False
     ) -> List[ EpochInfo ]:
         """
         Input is ( batch (trial) x channel x time ) Standardized multichannel timeseries ( N(0,1) across window )
@@ -484,17 +573,16 @@ class ShallowFBCSPNet:
             train_data = balance_dataset( train_data )
             test_data = balance_dataset( test_data )
 
-        device = next( self.model.parameters() ).device
+        if training_params is None:
+            training_params = ShallowFBCSPTrainingParameters(
+                annealing_epochs = max_epochs
+            )
 
-        loss_fn = nn.NLLLoss()
-        optimizer = th.optim.AdamW( 
-            self.model.parameters(), 
-            lr = learning_rate, 
-            weight_decay = weight_decay 
-        )
-            
-        scheduler = th.optim.lr_scheduler.CosineAnnealingLR( 
-            optimizer, T_max = max_epochs / 1 
+        training = ShallowFBCSPTraining(
+            model = self.model,
+            train = train_data,
+            test = test_data,
+            params = training_params
         )
 
         training_log: List[ EpochInfo ] = []
@@ -507,65 +595,11 @@ class ShallowFBCSPNet:
             except ImportError:
                 logger.warn( 'Attempted to provide progress bar, tqdm not installed' )
 
-        # Calculate weights for class balancing
-        # sampler = None
-        # if not isinstance( train_data, IterableDataset ):
-        #     labels = np.array( [ label for _, label in train_data ] )
-        #     classes, counts = np.unique( labels, return_counts = True )
-        #     weights = { cl.item(): 1.0 / co.item() for cl, co in zip( classes, counts ) }
-        #     weights = [ weights[ label ] for label in labels ]
-        #     sampler = WeightedRandomSampler( weights, len( train_data ), replacement = False )
-
-        for epoch_idx in epoch_itr:
-
-            self.model.train()
-            train_loss_batches = []
-            for train_feats, train_labels in DataLoader(
-                train_data,
-                batch_size = batch_size, 
-                # sampler = sampler,
-                pin_memory = pin_memory,
-            ):
-                pred: th.Tensor = self.model( train_feats.to( device ) )
-                pred = pred.mean( axis = 2 )
-                loss: th.Tensor = loss_fn( pred, train_labels.to( device ) )
-                train_loss_batches.append( loss.cpu().item() )
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-            scheduler.step()
-
-            accuracy = 0
-            test_loss_batches = []
-            self.model.eval()
-            with th.no_grad():
-                for test_feats, test_labels in DataLoader(
-                    test_data, 
-                    batch_size = batch_size, 
-                    pin_memory = pin_memory
-                ):
-                    output: th.Tensor = self.model( test_feats.to( device ) )
-                    output = output.mean( axis = 2 )
-                    loss: th.Tensor = loss_fn( output, test_labels.to( device ) )
-                    test_loss_batches.append( loss.cpu().item() )
-                    accuracy += ( output.argmax( axis = 1 ).cpu() == test_labels ).sum().item()
-
-            training_log.append( 
-                EpochInfo(
-                    epoch_idx = epoch_idx,
-                    train_loss = np.mean( train_loss_batches ),
-                    test_loss = np.mean( test_loss_batches ),
-                    test_accuracy = accuracy / len( test_data ),
-                    lr = scheduler.get_last_lr()[0]
-                ) 
-            )
-
+        for _ in epoch_itr:
+            training_log.append( training.run_epoch() )
             if epoch_callback is not None:
                 epoch_callback( training_log[-1] )
 
-        self.model.cpu()
         return training_log
 
     def inference( self, data: Union[ npt.ArrayLike, th.Tensor ], probs: bool = True ) -> np.ndarray:
