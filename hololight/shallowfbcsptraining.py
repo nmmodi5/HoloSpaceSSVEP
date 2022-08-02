@@ -333,7 +333,7 @@ class ConfusionPlot( param.Parameterized ):
 
     def __init__( self, **params ) -> None:
         super().__init__( **params )
-        self.fig, self.ax = plt.subplots()
+        self.fig, self.ax = plt.subplots( figsize = ( 3.0, 3.0 ) )
 
     def view( self ) -> Figure:
         self.ax.clear()
@@ -421,10 +421,8 @@ class TrainingDashboard( ez.Unit ):
         button_row = panel.Row( train_button, deploy_button, save_button )
 
         dashboard = panel.Row(
-            panel.Column(
-                self.STATE.train_plot.view,
-                self.STATE.confusion_plot.view,
-            ),
+            self.STATE.train_plot.view,
+            self.STATE.confusion_plot.view,
             panel.Column(
                 self.STATE.control_panel,
                 button_row,
