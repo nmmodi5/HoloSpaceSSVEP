@@ -257,78 +257,6 @@ class ShallowFBCSPTrainingParameters:
     loss_fn: nn.Module = field( default_factory = nn.NLLLoss )
 
 @dataclass
-class ShallowFBCSPTraining:
-    model: nn.Module
-    train: Dataset
-    test: Dataset
-
-    params: ShallowFBCSPTrainingParameters = field(
-        default_factory = ShallowFBCSPTrainingParameters
-    )
-
-    device: th.device = field( init = False )
-    optimizer: th.optim.Optimizer = field( init = False )
-    scheduler: th.optim.lr_scheduler._LRScheduler = field( init = False )
-
-    def __post_init__( self ):
-
-        self.device = next( self.model.parameters() ).device
-
-        self.optimizer = th.optim.AdamW( 
-            self.model.parameters(), 
-            lr = self.params.learning_rate, 
-            weight_decay = self.params.weight_decay 
-        )
-            
-        self.scheduler = th.optim.lr_scheduler.CosineAnnealingLR( 
-            self.optimizer, T_max = self.params.annealing_epochs / 1 
-        )
-
-    def run_epoch( self ) -> EpochInfo:
-
-        self.model.train()
-        train_loss_batches = []
-        for train_feats, train_labels in DataLoader(
-            self.train,
-            batch_size = self.params.batch_size, 
-            pin_memory = self.params.pin_memory,
-        ):
-            pred: th.Tensor = self.model( train_feats.to( self.device ) )
-            pred = pred.mean( axis = 2 )
-            loss: th.Tensor = self.params.loss_fn( pred, train_labels.to( self.device ) )
-            train_loss_batches.append( loss.cpu().item() )
-
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-
-        self.scheduler.step()
-
-        accuracy = 0
-        test_loss_batches = []
-        self.model.eval()
-        with th.no_grad():
-            for test_feats, test_labels in DataLoader(
-                self.test, 
-                batch_size = self.params.batch_size, 
-                pin_memory = self.params.pin_memory
-            ):
-                output: th.Tensor = self.model( test_feats.to( self.device ) )
-                output = output.mean( axis = 2 )
-                loss: th.Tensor = self.params.loss_fn( output, test_labels.to( self.device ) )
-                test_loss_batches.append( loss.cpu().item() )
-                accuracy += ( output.argmax( axis = 1 ).cpu() == test_labels ).sum().item()
-
-        info = EpochInfo(
-            train_loss = np.mean( train_loss_batches ),
-            test_loss = np.mean( test_loss_batches ),
-            test_accuracy = accuracy / len( self.test ),
-            lr = self.scheduler.get_last_lr()[0]
-        ) 
-
-        return info
-
-@dataclass
 class ShallowFBCSPCheckpoint:
     params: ShallowFBCSPParameters
     model_state: Dict[ str, Any ]
@@ -348,13 +276,13 @@ class ShallowFBCSPNet:
     """
 
     params: ShallowFBCSPParameters
-    model: th.nn.Module
+    _model: th.nn.Module
 
     def __init__( 
         self, 
         params: ShallowFBCSPParameters, 
         model_state: Optional[ Dict[ str, Any ] ] = None,
-        device_str: str = 'cpu',
+        device: str = 'cpu'
     ) -> None:
 
         self.params = params
@@ -371,15 +299,15 @@ class ShallowFBCSPNet:
             safe_log = safe_log 
         )
         
-        self.model = nn.Sequential()
-        self.model.add_module( "ensuredims", Ensure4d() )
+        self._model = nn.Sequential()
+        self._model.add_module( "ensuredims", Ensure4d() )
 
         if params.split_first_layer:
-            self.model.add_module( "dimshuffle", 
+            self._model.add_module( "dimshuffle", 
                 Expression( _transpose_time_to_spat ) 
             )
 
-            self.model.add_module( "conv_time", 
+            self._model.add_module( "conv_time", 
                 nn.Conv2d(
                     1,
                     params.n_filters_time,
@@ -388,7 +316,7 @@ class ShallowFBCSPNet:
                     dtype = dtype
                 ),
             )
-            self.model.add_module( "conv_spat",
+            self._model.add_module( "conv_spat",
                 nn.Conv2d(
                     params.n_filters_time,
                     params.n_filters_spat,
@@ -400,7 +328,7 @@ class ShallowFBCSPNet:
             )
             n_filters_conv = params.n_filters_spat
         else:
-            self.model.add_module( "conv_time",
+            self._model.add_module( "conv_time",
                 nn.Conv2d(
                     params.in_chans,
                     params.n_filters_time,
@@ -413,7 +341,7 @@ class ShallowFBCSPNet:
             n_filters_conv = params.n_filters_time
 
         if params.batch_norm:
-            self.model.add_module( "bnorm",
+            self._model.add_module( "bnorm",
                 nn.BatchNorm2d(
                     n_filters_conv, 
                     momentum = params.batch_norm_alpha, 
@@ -423,11 +351,11 @@ class ShallowFBCSPNet:
             )
 
         if params.conv_nonlin:
-            self.model.add_module( "conv_nonlin", Expression( 
+            self._model.add_module( "conv_nonlin", Expression( 
                 nonlin_dict[ params.conv_nonlin ] 
             ) )
 
-        self.model.add_module( "pool",
+        self._model.add_module( "pool",
             pool_class(
                 kernel_size = ( params.pool_time_length, 1 ),
                 stride = ( params.pool_time_stride, 1 ),
@@ -435,17 +363,17 @@ class ShallowFBCSPNet:
         )
 
         if params.pool_nonlin:
-            self.model.add_module( "pool_nonlin", Expression( 
+            self._model.add_module( "pool_nonlin", Expression( 
                 nonlin_dict[ params.pool_nonlin ] 
             ) )
 
-        self.model.add_module( "drop", nn.Dropout( p = params.drop_prob ) )
+        self._model.add_module( "drop", nn.Dropout( p = params.drop_prob ) )
 
-        output = dummy_output( self.model, params.in_chans, params.input_time_length )
+        output = dummy_output( self._model, params.in_chans, params.input_time_length )
         n_out_time = output.shape[2]
         if params.cropped_training: n_out_time = int( n_out_time // 2 )
 
-        self.model.add_module( "conv_classifier",
+        self._model.add_module( "conv_classifier",
             nn.Conv2d(
                 n_filters_conv,
                 params.n_classes,
@@ -455,44 +383,43 @@ class ShallowFBCSPNet:
             ),
         )
 
-        self.model.add_module( "softmax", nn.LogSoftmax( dim = 1 ) )
-        self.model.add_module( "squeeze", Expression( _squeeze_final_output ) )
+        self._model.add_module( "softmax", nn.LogSoftmax( dim = 1 ) )
+        self._model.add_module( "squeeze", Expression( _squeeze_final_output ) )
 
         if params.cropped_training:
-            to_dense_prediction_model( self.model )
+            to_dense_prediction_model( self._model )
 
         if model_state is None: self.reset_model()
-        else: self.model.load_state_dict( model_state )
+        else: self._model.load_state_dict( model_state )
 
-        device = th.device( device_str )
-        self.model.to( device )
+        self._model.to( th.device( device ) )
 
     def reset_model( self ) -> None:
         """
         (Re)Initialize model weights to appropriate starting values
         """
         # Initialization, xavier is same as in paper...
-        init.xavier_uniform_( self.model.conv_time.weight, gain = 1 )
+        init.xavier_uniform_( self._model.conv_time.weight, gain = 1 )
 
         # maybe no bias in case of no split layer and batch norm
         if self.params.split_first_layer or ( not self.batch_norm ):
-            init.constant_( self.model.conv_time.bias, 0 )
+            init.constant_( self._model.conv_time.bias, 0 )
         if self.params.split_first_layer:
-            init.xavier_uniform_( self.model.conv_spat.weight, gain = 1 )
+            init.xavier_uniform_( self._model.conv_spat.weight, gain = 1 )
             if not self.params.batch_norm:
-                init.constant_( self.model.conv_spat.bias, 0 )
+                init.constant_( self._model.conv_spat.bias, 0 )
         if self.params.batch_norm:
-            init.constant_( self.model.bnorm.weight, 1 )
-            init.constant_( self.model.bnorm.bias, 0 )
-        init.xavier_uniform_( self.model.conv_classifier.weight, gain = 1 )
-        init.constant_( self.model.conv_classifier.bias, 0 )
+            init.constant_( self._model.bnorm.weight, 1 )
+            init.constant_( self._model.bnorm.bias, 0 )
+        init.xavier_uniform_( self._model.conv_classifier.weight, gain = 1 )
+        init.constant_( self._model.conv_classifier.bias, 0 )
 
     def __repr__( self ) -> str:
         rep = super().__repr__()
-        model_rep = f'Model: {self.model.__repr__()}'
-        model_parameters = filter( lambda p: p.requires_grad, self.model.parameters() )
+        model_rep = f'Model: {self._model.__repr__()}'
+        model_parameters = filter( lambda p: p.requires_grad, self._model.parameters() )
         params = sum( [ np.prod( p.size() ) for p in model_parameters ] )
-        example_param = next( self.model.parameters() )
+        example_param = next( self._model.parameters() )
         device = example_param.device
         dtype = example_param.dtype
         param_rep = f'Model has {params} trainable parameters on device: {device}'
@@ -501,7 +428,7 @@ class ShallowFBCSPNet:
         stride_rep = f'When segmenting temporal windows -- use optimal temporal stride of {self.optimal_temporal_stride} samples'
         in_rep = f'Model input: ( batch x {self.params.in_chans} ch x ' + \
             f'{self.params.input_time_length} time points, {dtype=} )'
-        out = dummy_output( self.model, self.params.in_chans, self.params.input_time_length )
+        out = dummy_output( self._model, self.params.in_chans, self.params.input_time_length )
         out_rep = f'Model output: ( batch x {out.shape[1]} classes x {out.shape[2]} crops, dtype={out.dtype} )'
         return '\n'.join( [ rep, model_rep, param_rep, stride_rep, in_rep, out_rep ] )
 
@@ -520,10 +447,14 @@ class ShallowFBCSPNet:
             pickle.dump( self.checkpoint, checkpoint_f )
 
     @property
+    def model( self ) -> nn.Module:
+        return self._model
+
+    @property
     def checkpoint( self ) -> ShallowFBCSPCheckpoint:
         return ShallowFBCSPCheckpoint(
             params = self.params,
-            model_state = self.model.state_dict()
+            model_state = self._model.state_dict()
         )
 
     @property
@@ -536,7 +467,7 @@ class ShallowFBCSPNet:
         """
         if self.params.cropped_training:
             output = dummy_output( 
-                self.model, 
+                self._model, 
                 self.params.in_chans, 
                 self.params.input_time_length 
             )
@@ -579,7 +510,7 @@ class ShallowFBCSPNet:
             )
 
         training = ShallowFBCSPTraining(
-            model = self.model,
+            net = self,
             train = train_data,
             test = test_data,
             params = training_params
@@ -617,11 +548,11 @@ class ShallowFBCSPNet:
             # Assume we put in a single "trial" of data
             data = data[ None, ... ]
 
-        device = next( self.model.parameters() ).device
+        device = next( self._model.parameters() ).device
 
-        self.model.eval()
+        self._model.eval()
         with th.no_grad():
-            output: th.Tensor = self.model( data.to( device ) )
+            output: th.Tensor = self._model( data.to( device ) )
             if probs: output = output.exp()
             output = output.mean( axis = 2 )
 
@@ -641,10 +572,82 @@ class ShallowFBCSPNet:
         for true_idx, true_class in enumerate( classes ):
             class_trials = np.where( np.array( test_labels ) == true_class )[0]
             for pred_idx, pred_class in enumerate( classes ):
-                num_preds = ( decode[ class_trials ] == pred_class ).sum().item()
-                confusion[ true_idx, pred_idx ] = num_preds / len( class_trials )
+                num_preds: np.ndarray = ( decode[ class_trials ] == pred_class )
+                confusion[ true_idx, pred_idx ] = num_preds.sum() / len( class_trials ) # .sum().item()
         
-        return confusion
+        return confusion    
+
+@dataclass
+class ShallowFBCSPTraining:
+    net: ShallowFBCSPNet
+    train: Dataset
+    test: Dataset
+
+    params: ShallowFBCSPTrainingParameters = field(
+        default_factory = ShallowFBCSPTrainingParameters
+    )
+
+    device: th.device = field( init = False )
+    optimizer: th.optim.Optimizer = field( init = False )
+    scheduler: th.optim.lr_scheduler._LRScheduler = field( init = False )
+
+    def __post_init__( self ):
+
+        self.device = next( self.net.model.parameters() ).device
+
+        self.optimizer = th.optim.AdamW( 
+            self.net.model.parameters(), 
+            lr = self.params.learning_rate, 
+            weight_decay = self.params.weight_decay 
+        )
+            
+        self.scheduler = th.optim.lr_scheduler.CosineAnnealingLR( 
+            self.optimizer, T_max = self.params.annealing_epochs / 1 
+        )
+
+    def run_epoch( self ) -> EpochInfo:
+
+        self.net.model.train()
+        train_loss_batches = []
+        for train_feats, train_labels in DataLoader(
+            self.train,
+            batch_size = self.params.batch_size, 
+            pin_memory = self.params.pin_memory,
+        ):
+            pred: th.Tensor = self.net.model( train_feats.to( self.device ) )
+            pred = pred.mean( axis = 2 )
+            loss: th.Tensor = self.params.loss_fn( pred, train_labels.to( self.device ) )
+            train_loss_batches.append( loss.cpu().item() )
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+        self.scheduler.step()
+
+        accuracy = 0
+        test_loss_batches = []
+        self.net.model.eval()
+        with th.no_grad():
+            for test_feats, test_labels in DataLoader(
+                self.test, 
+                batch_size = self.params.batch_size, 
+                pin_memory = self.params.pin_memory
+            ):
+                output: th.Tensor = self.net.model( test_feats.to( self.device ) )
+                output = output.mean( axis = 2 )
+                loss: th.Tensor = self.params.loss_fn( output, test_labels.to( self.device ) )
+                test_loss_batches.append( loss.cpu().item() )
+                accuracy += ( output.argmax( axis = 1 ).cpu() == test_labels ).sum().item()
+
+        info = EpochInfo(
+            train_loss = np.mean( train_loss_batches ),
+            test_loss = np.mean( test_loss_batches ),
+            test_accuracy = accuracy / len( self.test ),
+            lr = self.scheduler.get_last_lr()[0]
+        ) 
+
+        return info
 
 try:
     import matplotlib.pyplot as plt
@@ -688,4 +691,4 @@ try:
         ax.set_title( 'Classifier Confusion' )
 
 except ImportError:
-    pass         
+    pass     
