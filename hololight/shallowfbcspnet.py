@@ -458,6 +458,13 @@ class ShallowFBCSPNet:
         )
 
     @property
+    def min_input_time_len( self ) -> int:
+        """ The minimum temporal input size required for the model """
+        if self.params.cropped_training:
+            return self.params.input_time_length - self.optimal_temporal_stride
+        else: return self.params.input_time_length
+
+    @property
     def optimal_temporal_stride( self ) -> int:
         """
         If performing cropped training, it can help to window data using the 
@@ -543,7 +550,7 @@ class ShallowFBCSPNet:
             If probs = False, output is log-probabilities
         """
         if not isinstance( data, th.Tensor ):
-            data = th.tensor( data )
+            data = th.tensor( data, dtype = th.float32 if self.params.single_precision else th.float64 )
         if len( data.shape ) == 2:
             # Assume we put in a single "trial" of data
             data = data[ None, ... ]
@@ -654,8 +661,8 @@ try:
     from matplotlib.axes import Axes
 
     def plot_train_info_mpl( train_info: List[ EpochInfo ], ax: Axes ) -> None:
-        ax.plot( [ e.train_loss for e in train_info ], label = 'Train' )
-        ax.plot( [ e.test_loss for e in train_info ], label = 'Test' )
+        ax.plot( [ e.train_loss for e in train_info ], label = 'Train Loss' )
+        ax.plot( [ e.test_loss for e in train_info ], label = 'Test Loss' )
         ax.plot( [ e.test_accuracy for e in train_info ], label = 'Test Accuracy' )
         ax.plot( [ e.lr for e in train_info ], label = 'Learning Rate' )
         ax.legend()
