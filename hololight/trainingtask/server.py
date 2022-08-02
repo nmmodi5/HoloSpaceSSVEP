@@ -19,7 +19,7 @@ from typing import AsyncGenerator, Optional, List
 
 logger = logging.getLogger( __name__ )
 
-class TrainingServerSettings( ez.Settings ):
+class TrainingTaskServerSettings( ez.Settings ):
     cert: Path
     key: Optional[ Path ] = None
     ca_cert: Optional[ Path ] = None
@@ -27,15 +27,15 @@ class TrainingServerSettings( ez.Settings ):
     port: int = 8080
     ws_port: int = 5545
 
-class TrainingServerState( ez.State ):
+class TrainingTaskServerState( ez.State ):
     trigger_queue: "asyncio.Queue[ SampleTriggerMessage ]" = field( 
         default_factory = asyncio.Queue 
     )
 
-class TrainingServer( ez.Unit ):
+class TrainingTaskServer( ez.Unit ):
 
-    SETTINGS: TrainingServerSettings
-    STATE: TrainingServerState
+    SETTINGS: TrainingTaskServerSettings
+    STATE: TrainingTaskServerState
 
     OUTPUT_SAMPLETRIGGER = ez.InputStream( SampleTriggerMessage )
 
@@ -145,19 +145,19 @@ class TrainingServer( ez.Unit ):
 
 from ezmsg.testing.debuglog import DebugLog
 
-class TrainingServerTestSystem( ez.System ):
+class TrainingTaskServerTestSystem( ez.System ):
 
-    SETTINGS: TrainingServerSettings
+    SETTINGS: TrainingTaskServerSettings
 
-    SERVER = TrainingServer()
+    TASK_SERVER = TrainingTaskServer()
     DEBUG = DebugLog()
 
     def configure( self ) -> None:
-        return self.SERVER.apply_settings( self.SETTINGS )
+        return self.TASK_SERVER.apply_settings( self.SETTINGS )
 
     def network( self ) -> ez.NetworkDefinition:
         return (
-            ( self.SERVER.OUTPUT_SAMPLETRIGGER, self.DEBUG.INPUT ),
+            ( self.TASK_SERVER.OUTPUT_SAMPLETRIGGER, self.DEBUG.INPUT ),
         )
 
 if __name__ == '__main__':
@@ -195,13 +195,13 @@ if __name__ == '__main__':
     key: Optional[ Path ] = args.key
     cacert: Optional[ Path ] = args.cacert
 
-    settings = TrainingServerSettings(
+    settings = TrainingTaskServerSettings(
         cert = cert,
         key = key,
         ca_cert = cacert
     )
 
-    system = TrainingServerTestSystem( settings )
+    system = TrainingTaskServerTestSystem( settings )
     ez.run_system( system )
 
 

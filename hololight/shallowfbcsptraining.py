@@ -19,7 +19,7 @@ import numpy as np
 import torch as th
 from torch.utils.data import Dataset, ConcatDataset
 
-from .training.server import TrainingServer, TrainingServerSettings
+from .trainingtask.server import TrainingTaskServer, TrainingTaskServerSettings
 from .sampler import Sampler, SamplerSettings, SampleMessage
 from .classdecodemessage import ClassDecodeMessage
 from .shallowfbcspnet import (
@@ -351,7 +351,7 @@ class PublishOnce( ez.Unit ):
 
 class ShallowFBCSPTrainingTestSystemSettings( ez.Settings ):
     fbcsptraining_settings: FBCSPTrainingSettings
-    trainingserver_settings: TrainingServerSettings
+    trainingserver_settings: TrainingTaskServerSettings
     eeg_settings: EEGSynthSettings = field( 
         default_factory = EEGSynthSettings 
     )
@@ -372,7 +372,7 @@ class ShallowFBCSPTrainingTestSystem( ez.System ):
     WINDOW = Window()
     PLOTTER = EEGPlotter()
 
-    TRAIN_SERVER = TrainingServer()
+    TRAIN_SERVER = TrainingTaskServer()
     FBCSP_TRAINING = FBCSPTraining()
     DEBUG = DebugLog()
 
@@ -536,7 +536,7 @@ if __name__ == '__main__':
             output_window_shift = 1.0, # sec
         ),
 
-        trainingserver_settings = TrainingServerSettings(
+        trainingserver_settings = TrainingTaskServerSettings(
             cert = cert,
             key = key,
             ca_cert = cacert
