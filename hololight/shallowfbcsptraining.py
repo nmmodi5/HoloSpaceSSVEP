@@ -2,6 +2,8 @@ import asyncio
 import io
 import json
 import logging
+import pickle
+import time
 
 from pathlib import Path
 from dataclasses import dataclass, field, replace
@@ -20,7 +22,7 @@ import torch as th
 from torch.utils.data import Dataset, ConcatDataset
 
 from .trainingtask.server import TrainingTaskServer, TrainingTaskServerSettings
-from .sampler import Sampler, SamplerSettings, SampleMessage
+from .sampler import SampleTriggerMessage, Sampler, SamplerSettings, SampleMessage
 from .classdecodemessage import ClassDecodeMessage
 from .shallowfbcspnet import (
     EpochInfo, 
@@ -35,6 +37,8 @@ from .shallowfbcspnet import (
 from typing import AsyncGenerator, List, Optional, Tuple, Any
 
 logger = logging.getLogger( __name__ )
+
+TIMESTR_FMT = '%Y%m%dT%H%M%S'
 
 class FBCSPDataset( Dataset ):
     """
@@ -136,12 +140,12 @@ class FBCSPTrainMessage( ez.Message ):
     reset: bool = False
 
     # All the following parameters are ignored unless reset = True
-    model_dir: Optional[ Path ] = None
+    session_dir: Optional[ Path ] = None
     net_params: Optional[ FBCSPNetParameters ] = None
     train_params: Optional[ ShallowFBCSPTrainingParameters ] = None
 
 class FBCSPTrainingSettings( ez.Settings ):
-    model_dir: Optional[ Path ] = None
+    session_dir: Optional[ Path ] = None
     device: str = 'cpu'
     single_precision: bool = True
     default_network_params: FBCSPNetParameters = field( 
@@ -171,17 +175,17 @@ class FBCSPTraining( ez.Unit ):
 
         if self.STATE.context is None or msg.reset:
             # Create a new model context
-            model_dir = self.SETTINGS.model_dir
-            if msg.model_dir is not None: 
-                model_dir = msg.model_dir 
-            if model_dir is None:
+            session_dir = self.SETTINGS.session_dir
+            if msg.session_dir is not None: 
+                session_dir = msg.session_dir 
+            if session_dir is None:
                 logger.warn( 'Cancelling FBCSP Training -- No directory set' )
                 return
 
             # Load datasets
             datasets: List[ FBCSPDataset ] = list()
             all_labels: List[ int ] = list()
-            for fname in model_dir.glob( '*.txt' ):
+            for fname in session_dir.glob( '*.txt' ):
                 dataset = FBCSPDataset( fname, 
                     single_precision = self.SETTINGS.single_precision )
                 if len( dataset ) == 0: continue
@@ -312,7 +316,7 @@ class TrainingCurves( param.Parameterized ):
 
     def __init__( self, **params ) -> None:
         super().__init__( **params )
-        self.fig, self.ax = plt.subplots()
+        self.fig, self.ax = plt.subplots( figsize = ( 6.0, 4.0 ) )
 
     def view( self ) -> Figure:
         if self.train_info is None:
@@ -333,7 +337,7 @@ class ConfusionPlot( param.Parameterized ):
 
     def __init__( self, **params ) -> None:
         super().__init__( **params )
-        self.fig, self.ax = plt.subplots( figsize = ( 3.0, 3.0 ) )
+        self.fig, self.ax = plt.subplots( figsize = ( 4.0, 4.0 ) )
 
     def view( self ) -> Figure:
         self.ax.clear()
@@ -348,14 +352,15 @@ class TrainingControlPanel( param.Parameterized ):
     reset: bool = param.Boolean( default = False )
 
     # TODO: Add accessability of the remaining parameters
-    # Except maybe model_dir, which should probably just be static
+    # Except maybe session_dir, which should probably just be static
 
     # All the following parameters are ignored unless reset = True
-    # model_dir: Optional[ Path ] = None
+    # session_dir: Optional[ Path ] = None
     # net_params: Optional[ FBCSPNetParameters ] = None
     # train_params: Optional[ ShallowFBCSPTrainingParameters ] = None
 
 class TrainingDashboardSettings( ez.Settings ):
+    session_dir: Path
     port: int = 8083
 
 class TrainingDashboardState( ez.State ):
@@ -363,9 +368,11 @@ class TrainingDashboardState( ez.State ):
     confusion_plot: ConfusionPlot = field( default_factory = ConfusionPlot )
     control_panel: TrainingControlPanel = field( default_factory = TrainingControlPanel )
 
-    train_queue: "asyncio.Queue[FBCSPTrainMessage]" = field( 
-        default_factory = asyncio.Queue 
-    )
+    checkpoint: Optional[ ShallowFBCSPCheckpoint ] = None
+    train_queue: "asyncio.Queue[ FBCSPTrainMessage ]" = field( 
+        default_factory = asyncio.Queue )
+    deploy_queue: "asyncio.Queue[ Optional[ ShallowFBCSPCheckpoint ] ]" = field(
+        default_factory = asyncio.Queue )
 
 class TrainingDashboard( ez.Unit ):
 
@@ -375,6 +382,9 @@ class TrainingDashboard( ez.Unit ):
     INPUT_EPOCH = ez.InputStream( Optional[ EpochInfo ] )
     INPUT_CONFUSION = ez.InputStream( np.ndarray )
     OUTPUT_TRAIN = ez.OutputStream( FBCSPTrainMessage )
+
+    INPUT_CHECKPOINT = ez.InputStream( ShallowFBCSPCheckpoint )
+    OUTPUT_CHECKPOINT = ez.OutputStream( ShallowFBCSPCheckpoint )
 
     @ez.subscriber( INPUT_EPOCH )
     async def on_epoch( self, msg: Optional[ EpochInfo ] ) -> None:
@@ -390,11 +400,22 @@ class TrainingDashboard( ez.Unit ):
     async def on_confusion( self, msg: np.ndarray ) -> None:
         self.STATE.confusion_plot.confusion = msg
 
+    @ez.subscriber( INPUT_CHECKPOINT )
+    async def on_checkpoint( self, msg: ShallowFBCSPCheckpoint ) -> None:
+        self.STATE.checkpoint = msg
+
     @ez.publisher( OUTPUT_TRAIN )
     async def start_training( self ) -> AsyncGenerator:
         while True:
             msg = await self.STATE.train_queue.get()
             yield self.OUTPUT_TRAIN, msg
+
+    @ez.publisher( OUTPUT_CHECKPOINT )
+    async def deploy( self ) -> AsyncGenerator:
+        while True:
+            msg = await self.STATE.deploy_queue.get()
+            if msg is not None:
+                yield self.OUTPUT_CHECKPOINT, msg
         
     @ez.main
     def serve_dashboard( self ) -> None:
@@ -405,18 +426,24 @@ class TrainingDashboard( ez.Unit ):
                 self.STATE.train_queue.put_nowait, 
                 FBCSPTrainMessage( 
                     n_epochs = self.STATE.control_panel.n_epochs, 
-                    reset = self.STATE.control_panel.reset
-                )
-            )
-        )
+                    reset = self.STATE.control_panel.reset ) ) )
 
-        # TODO
         deploy_button = panel.widgets.Button( name = 'Deploy', width = 50 )
-        deploy_button.on_click( lambda event: print( 'Deploy!' ) )
+        deploy_button.on_click( lambda _:
+            asyncio.get_running_loop().call_soon_threadsafe(
+                self.STATE.deploy_queue.put_nowait,
+                self.STATE.checkpoint ) )
 
-        # TODO
+        def save_checkpoint( _: Any ) -> None:
+            checkpoint = self.STATE.checkpoint
+            if checkpoint is not None:
+                timestr = time.strftime( TIMESTR_FMT, checkpoint.creation_time )
+                out_fname = self.SETTINGS.session_dir / f'{timestr}.checkpoint'
+                with open( out_fname, 'wb' ) as out_f:
+                    pickle.dump( checkpoint, out_f )
+
         save_button = panel.widgets.Button( name = 'Save', width = 50 )
-        save_button.on_click( lambda event: print( 'Save!' ) )
+        save_button.on_click( save_checkpoint )
 
         button_row = panel.Row( train_button, deploy_button, save_button )
 
@@ -431,18 +458,6 @@ class TrainingDashboard( ez.Unit ):
         )
         panel.serve( dashboard, port = self.SETTINGS.port )
 
-
-# Dev/Test Fixture
-
-import time
-
-from ezmsg.testing.debuglog import DebugLog
-from ezmsg.sigproc.window import Window, WindowSettings
-from ezmsg.eeg.eegmessage import EEGMessage
-
-from .plotter import EEGPlotter
-from .eegsynth import EEGSynth, EEGSynthSettings
-from .preprocessing import Preprocessing, PreprocessingSettings
 
 class SampleSignalModulatorSettings( ez.Settings ):
     signal_amplitude: float = 0.01
@@ -483,79 +498,60 @@ class SampleSignalModulator( ez.Unit ):
         yield self.OUTPUT_EEG, sample
         yield self.OUTPUT_SAMPLE, replace( msg, sample = sample )
 
-# class PublishOnceSettings( ez.Settings ):
-#     msg: Any
-#     delay: Optional[ float ] = None 
 
-# class PublishOnce( ez.Unit ):
-#     SETTINGS: PublishOnceSettings
-#     OUTPUT = ez.OutputStream( Any )
-
-#     @ez.publisher( OUTPUT )
-#     async def pub_once( self ) -> AsyncGenerator:
-#         if self.SETTINGS.delay:
-#             await asyncio.sleep( self.SETTINGS.delay )
-#         yield self.OUTPUT, self.SETTINGS.msg
-
-
-class ShallowFBCSPTrainingTestSystemSettings( ez.Settings ):
-    session: Path
-    trainingserver_settings: TrainingTaskServerSettings
+class FBCSPSettings( ez.Settings ):
+    session_dir: Path
+    trainingtaskserver_settings: TrainingTaskServerSettings
     train_device: str = 'cpu'
     inference_device: str = 'cpu'
-    eeg_settings: EEGSynthSettings = field( 
-        default_factory = EEGSynthSettings 
-    )
-    preproc_settings: PreprocessingSettings = field(
-        default_factory = PreprocessingSettings
-    )
 
-class ShallowFBCSPTrainingTestSystem( ez.System ):
+class FBCSP( ez.Collection ):
 
-    SETTINGS: ShallowFBCSPTrainingTestSystemSettings
+    SETTINGS: FBCSPSettings
 
-    EEG = EEGSynth()
-    PREPROC = Preprocessing()
-    SAMPLER = Sampler()
-    INJECTOR = SampleSignalModulator()
-    LOGGER = MessageLogger()
-
-    PLOTTER = EEGPlotter()
+    INPUT_SIGNAL = ez.InputStream( EEGMessage )
+    INPUT_TRIGGER = ez.InputStream( SampleTriggerMessage )
+    OUTPUT_DECODE = ez.OutputStream( ClassDecodeMessage )
 
     TASK_SERVER = TrainingTaskServer()
     FBCSP_TRAINING = FBCSPTraining()
     FBCSP_INFERENCE = FBCSPInference()
     DASHBOARD = TrainingDashboard()
-    DEBUG = DebugLog()
+    SAMPLER = Sampler()
+    INJECTOR = SampleSignalModulator()
+    LOGGER = MessageLogger()
 
     def configure( self ) -> None:
-        timestr = time.strftime( '%Y%m%dT%H%M%S' )
-        run_fname = self.SETTINGS.session / f'{timestr}.txt'
+
+        # Make sure our session directory exists..
+        self.SETTINGS.session_dir.mkdir( parents = True, exist_ok = True )
+
+        self.DASHBOARD.apply_settings(
+            TrainingDashboardSettings(
+                session_dir = self.SETTINGS.session_dir
+            )
+        )
 
         self.FBCSP_TRAINING.apply_settings( 
             FBCSPTrainingSettings(
-                model_dir = self.SETTINGS.session,
+                session_dir = self.SETTINGS.session_dir,
                 device = self.SETTINGS.train_device,
             )
         )
 
+        # Find the most recent saved checkpoint file
+        checkpoints = list( sorted( self.SETTINGS.session_dir.glob( '*.checkpoint' ) ) )
+        checkpoint = checkpoints[-1] if len( checkpoints ) else None
+
         self.FBCSP_INFERENCE.apply_settings(
             FBCSPInferenceSettings(
-                checkpoint_file = None,
+                checkpoint_file = checkpoint,
                 inference_device = self.SETTINGS.inference_device
             )
         )
 
-        self.EEG.apply_settings(
-            self.SETTINGS.eeg_settings
-        )
-
-        self.PREPROC.apply_settings(
-            self.SETTINGS.preproc_settings
-        )
-
         self.TASK_SERVER.apply_settings(
-            self.SETTINGS.trainingserver_settings
+            self.SETTINGS.trainingtaskserver_settings
         )
 
         self.SAMPLER.apply_settings(
@@ -564,6 +560,8 @@ class ShallowFBCSPTrainingTestSystem( ez.System ):
             )
         )
 
+        timestr = time.strftime( TIMESTR_FMT )
+        run_fname = self.SETTINGS.session_dir / f'{timestr}.txt'
         self.LOGGER.apply_settings(
             MessageLoggerSettings(
                 output = run_fname
@@ -572,42 +570,69 @@ class ShallowFBCSPTrainingTestSystem( ez.System ):
 
     def network( self ) -> ez.NetworkDefinition:
         return ( 
-            ( self.EEG.OUTPUT_SIGNAL, self.PREPROC.INPUT_SIGNAL ),
-            ( self.PREPROC.OUTPUT_SIGNAL, self.SAMPLER.INPUT_SIGNAL ),
+            ( self.INPUT_SIGNAL, self.SAMPLER.INPUT_SIGNAL ),
             ( self.SAMPLER.OUTPUT_SAMPLE, self.INJECTOR.INPUT_SAMPLE ),
             ( self.INJECTOR.OUTPUT_SAMPLE, self.LOGGER.INPUT_MESSAGE ),
 
-            ( self.INJECTOR.OUTPUT_SAMPLE, self.DEBUG.INPUT ),
-
-            ( self.FBCSP_TRAINING.OUTPUT_CHECKPOINT, self.FBCSP_INFERENCE.INPUT_CHECKPOINT ),
-            ( self.PREPROC.OUTPUT_SIGNAL, self.FBCSP_INFERENCE.INPUT_SIGNAL ),
-            
-            # DEBUG STUFF
-            # ( self.PUBONCE.OUTPUT, self.FBCSP_TRAINING.INPUT_TRAIN ),
-            # ( self.FBCSP_TRAINING.OUTPUT_EPOCH, self.DEBUG.INPUT ),
-            # ( self.FBCSP_TRAINING.OUTPUT_CONFUSION, self.DEBUG.INPUT ),
-            # ( self.FBCSP_TRAINING.OUTPUT_CHECKPOINT, self.DEBUG.INPUT ),
-            ( self.FBCSP_INFERENCE.OUTPUT_DECODE, self.DEBUG.INPUT ),
-
             ( self.FBCSP_TRAINING.OUTPUT_EPOCH, self.DASHBOARD.INPUT_EPOCH ),
             ( self.FBCSP_TRAINING.OUTPUT_CONFUSION, self.DASHBOARD.INPUT_CONFUSION ),
+            ( self.FBCSP_TRAINING.OUTPUT_CHECKPOINT, self.DASHBOARD.INPUT_CHECKPOINT ),
             ( self.DASHBOARD.OUTPUT_TRAIN, self.FBCSP_TRAINING.INPUT_TRAIN ),
+            ( self.DASHBOARD.OUTPUT_CHECKPOINT, self.FBCSP_INFERENCE.INPUT_CHECKPOINT ),
+
+            ( self.INPUT_SIGNAL, self.FBCSP_INFERENCE.INPUT_SIGNAL ),
+            ( self.FBCSP_INFERENCE.OUTPUT_DECODE, self.OUTPUT_DECODE ),
 
             ( self.TASK_SERVER.OUTPUT_SAMPLETRIGGER, self.SAMPLER.INPUT_TRIGGER ),
-
-            # Plotter connections
-            ( self.INJECTOR.OUTPUT_EEG, self.PLOTTER.INPUT_SIGNAL ),
-
+            ( self.INPUT_TRIGGER, self.SAMPLER.INPUT_TRIGGER )
         )
 
     def process_components( self ) -> Tuple[ ez.Component, ... ]:
         return (  
-            self.PLOTTER, 
             self.TASK_SERVER,
             self.LOGGER,
             self.DASHBOARD,
             self.FBCSP_TRAINING,
             self.FBCSP_INFERENCE
+        )
+
+
+# Dev/Test Fixture
+
+from ezmsg.testing.debuglog import DebugLog
+
+from .eegsynth import EEGSynth, EEGSynthSettings
+from .preprocessing import Preprocessing, PreprocessingSettings
+
+class FBCSPTestSystemSettings( ez.Settings ):
+    fbcsp_settings: FBCSPSettings
+    eeg_settings: EEGSynthSettings = field( 
+        default_factory = EEGSynthSettings 
+    )
+    preproc_settings: PreprocessingSettings = field(
+        default_factory = PreprocessingSettings
+    )
+
+class FBCSPTestSystem( ez.System ):
+
+    SETTINGS: FBCSPTestSystemSettings
+
+    EEG = EEGSynth()
+    PREPROC = Preprocessing()
+    FBCSP = FBCSP()
+    DEBUG = DebugLog()
+
+    def configure( self ) -> None:
+
+        self.EEG.apply_settings( self.SETTINGS.eeg_settings )
+        self.PREPROC.apply_settings( self.SETTINGS.preproc_settings )
+        self.FBCSP.apply_settings( self.SETTINGS.fbcsp_settings )
+
+    def network( self ) -> ez.NetworkDefinition:
+        return ( 
+            ( self.EEG.OUTPUT_SIGNAL, self.PREPROC.INPUT_SIGNAL ),
+            ( self.PREPROC.OUTPUT_SIGNAL, self.FBCSP.INPUT_SIGNAL ),
+            ( self.FBCSP.OUTPUT_DECODE, self.DEBUG.INPUT )
         )
 
 if __name__ == '__main__':
@@ -626,7 +651,7 @@ if __name__ == '__main__':
     )
 
     parser.add_argument( 
-        '--session',
+        '--session-dir',
         type = lambda x: Path( x ),
         help = "Directory to store samples and model checkpoints",
         default = Path( '.' ) / 'test_session'
@@ -656,13 +681,22 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     channels: int = args.channels
-    session: Path = args.session
+    session_dir: Path = args.session_dir
     cert: Path = args.cert
     key: Optional[ Path ] = args.key
     cacert: Optional[ Path ] = args.cacert
 
-    settings = ShallowFBCSPTrainingTestSystemSettings(
-        session = session,
+    settings = FBCSPTestSystemSettings(
+
+        fbcsp_settings = FBCSPSettings(
+            session_dir = session_dir,
+            trainingtaskserver_settings = TrainingTaskServerSettings(
+                cert = cert,
+                key = key,
+                ca_cert = cacert
+            ),
+        ),
+
         eeg_settings = EEGSynthSettings(
             fs = 500.0, # Hz
             channels = channels,
@@ -694,14 +728,8 @@ if __name__ == '__main__':
             output_window_dur = 4.0, # sec
             output_window_shift = 4.0, # sec
         ),
-
-        trainingserver_settings = TrainingTaskServerSettings(
-            cert = cert,
-            key = key,
-            ca_cert = cacert
-        ),
     )
 
-    system = ShallowFBCSPTrainingTestSystem( settings )
+    system = FBCSPTestSystem( settings )
 
     ez.run_system( system )

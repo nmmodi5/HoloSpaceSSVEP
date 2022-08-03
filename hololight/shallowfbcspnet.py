@@ -3,6 +3,7 @@
 
 import logging
 import pickle
+import time
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -260,6 +261,7 @@ class ShallowFBCSPTrainingParameters:
 class ShallowFBCSPCheckpoint:
     params: ShallowFBCSPParameters
     model_state: Dict[ str, Any ]
+    creation_time: time.struct_time = field( init = False, default_factory = time.localtime )
 
 class ShallowFBCSPNet:
     """
