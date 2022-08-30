@@ -4,6 +4,7 @@ from pathlib import Path
 import ezmsg.core as ez
 
 from ezmsg.eeg.openbci import (
+    OpenBCISource,
     OpenBCISourceSettings, 
     GainState,
     PowerStatus,
@@ -12,24 +13,20 @@ from ezmsg.eeg.openbci import (
     OpenBCIChannelSetting,
 )
 
-from ezmsg.testing.debuglog import DebugLog
-from ezmsg.eeg.openbci import OpenBCISource, OpenBCISourceSettings
-
 from ezmsg.fbcsp.decoder import FBCSP, FBCSPSettings
 from ezmsg.fbcsp.samplemapper import SampleMapperSettings
 from ezmsg.fbcsp.trainingtask.server import TrainingTaskServerSettings
 
 from ezmsg.eeg.eegmessage import EEGMessage
+
 from ezmsg.sigproc.decimate import Decimate, DownsampleSettings
 from ezmsg.sigproc.butterworthfilter import ButterworthFilter, ButterworthFilterSettings
 from ezmsg.sigproc.ewmfilter import EWMFilter, EWMFilterSettings
 from ezmsg.sigproc.window import Window, WindowSettings
 
-from .frontend.demo import HololightDemoSettings
-
 from typing import Dict, Optional, Any, Tuple
 
-from .frontend.demo import HololightDemo, HololightDemoSettings
+from hololight.demo import HololightDemo, HololightDemoSettings
 
 class PreprocessingSettings( ez.Settings ):
     # 1. Bandpass Filter
@@ -128,8 +125,6 @@ class HololightSystem( ez.System ):
     PREPROC = Preprocessing()
     DECODER = FBCSP()
     HOLOLIGHT = HololightDemo()
-
-    DEBUG = DebugLog()
 
     def configure( self ) -> None:
         self.SOURCE.apply_settings( self.SETTINGS.openbcisource_settings )
