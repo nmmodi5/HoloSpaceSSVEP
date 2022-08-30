@@ -14,7 +14,7 @@ import websockets
 import websockets.server
 import websockets.exceptions
 
-from ..shallowfbcspdecoder import DecoderOutput
+from ezmsg.fbcsp.classdecodemessage import ClassDecodeMessage
 
 from typing import AsyncGenerator, Optional, List
 
@@ -42,7 +42,7 @@ class HololightDemo( ez.Unit ):
     SETTINGS: HololightDemoSettings
     STATE: HololightDemoState
 
-    INPUT_DECODE = ez.InputStream( DecoderOutput )
+    INPUT_DECODE = ez.InputStream( ClassDecodeMessage )
 
     def initialize( self ) -> None:
         bridge = Bridge( self.SETTINGS.bridge_host )
@@ -125,11 +125,10 @@ class HololightDemo( ez.Unit ):
 
 
     @ez.subscriber( INPUT_DECODE )
-    async def on_decode( self, decode: DecoderOutput ) -> None:
+    async def on_decode( self, decode: ClassDecodeMessage ) -> None:
 
-        probs = np.exp( decode.output )
-        cur_class = probs.argmax()
-        cur_prob = probs[ cur_class ]
+        cur_class = decode.data.argmax( axis = decode.class_dim )
+        cur_prob = decode.data[ :, cur_class ]
 
         logger.info( f'Decoder: {cur_class} @ {cur_prob}' )
 
@@ -173,15 +172,15 @@ class HololightDemo( ez.Unit ):
 
 class GenerateDecodeOutput( ez.Unit ):
 
-    OUTPUT_DECODE = ez.OutputStream( DecoderOutput )
+    OUTPUT_DECODE = ez.OutputStream( ClassDecodeMessage )
 
     @ez.publisher( OUTPUT_DECODE )
     async def generate( self ) -> AsyncGenerator:
         output = np.array( [ True, False ] )
         while True:
             out = ( output.astype( float ) * 0.9 ) + 0.05
-            out = np.log( out / out.sum() )
-            yield self.OUTPUT_DECODE, DecoderOutput( out )
+            out /= out.sum()
+            yield self.OUTPUT_DECODE, ClassDecodeMessage( data = out )
             await asyncio.sleep( 2.0 )
             output = ~output
 

@@ -1,4 +1,4 @@
-import time
+from dataclasses import field
 from pathlib import Path
 
 import ezmsg.core as ez
@@ -12,22 +12,141 @@ from ezmsg.eeg.openbci import (
     OpenBCIChannelSetting,
 )
 
-from ezmsg.websocket import WebsocketSettings
+from ezmsg.testing.debuglog import DebugLog
+from ezmsg.eeg.openbci import OpenBCISource, OpenBCISourceSettings
 
-from .go_task import GoTaskSettings
-from .modeltraining import ( 
-    ModelTrainingLogicSettings, 
-    ModelTrainingSettings, 
-    TestSignalInjectorSettings
-)
-from .shallowfbcspdecoder import ShallowFBCSPDecoderSettings
-from .hololightsystem import HololightSystem, HololightSystemSettings
+from ezmsg.fbcsp.decoder import FBCSP, FBCSPSettings
+from ezmsg.fbcsp.samplemapper import SampleMapperSettings
+from ezmsg.fbcsp.trainingtask.server import TrainingTaskServerSettings
+
+from ezmsg.eeg.eegmessage import EEGMessage
+from ezmsg.sigproc.decimate import Decimate, DownsampleSettings
+from ezmsg.sigproc.butterworthfilter import ButterworthFilter, ButterworthFilterSettings
+from ezmsg.sigproc.ewmfilter import EWMFilter, EWMFilterSettings
+from ezmsg.sigproc.window import Window, WindowSettings
+
 from .frontend.demo import HololightDemoSettings
 
-from typing import (
-    Dict,
-    Optional
-)
+from typing import Dict, Optional, Any, Tuple
+
+from .frontend.demo import HololightDemo, HololightDemoSettings
+
+class PreprocessingSettings( ez.Settings ):
+    # 1. Bandpass Filter
+    bpfilt_order: int = 5
+    bpfilt_cuton: float = 5.0 # Hz
+    bpfilt_cutoff: float = 30.0 # Hz
+
+    # 2. Downsample
+    downsample_factor: int = 4 # Downsample factor to reduce sampling rate to ~ 100 Hz
+
+    # 3. Exponentially Weighted Standardization
+    ewm_history_dur: float = 2.0 # sec
+
+    # 4. Sliding Window
+    output_window_dur: float = 1.0 # sec
+    # output_window_shift: float = 0.5 # sec
+    output_window_shift: float = 1.0 # For training, we dont want overlap
+
+
+class Preprocessing( ez.Collection ):
+    """
+    Preprocessing pipeline for an EEG neural network decoder.
+
+    Preprocessing consists of:
+
+    1. Bandpass Filtering
+    X. TODO: Common Average Reference/Spatial Filtering
+    2. Downsampling
+    3. Exponentially Weighted Moving Standardization
+    4. Windowing
+    """
+
+    SETTINGS: PreprocessingSettings
+
+    INPUT_SIGNAL = ez.InputStream( EEGMessage )
+    OUTPUT_SIGNAL = ez.OutputStream( EEGMessage )
+
+    # Subunits
+    BPFILT = ButterworthFilter()
+    DECIMATE = Decimate()
+    EWM = EWMFilter()
+    WINDOW = Window()
+
+    def configure( self ) -> None:
+        self.BPFILT.apply_settings(
+            ButterworthFilterSettings(
+                order = self.SETTINGS.bpfilt_order,
+                cuton = self.SETTINGS.bpfilt_cuton,
+                cutoff = self.SETTINGS.bpfilt_cutoff
+            )
+        )
+        self.DECIMATE.apply_settings( 
+            DownsampleSettings(
+                factor = self.SETTINGS.downsample_factor
+            )
+        )
+
+        self.EWM.apply_settings(
+            EWMFilterSettings(
+                history_dur = self.SETTINGS.ewm_history_dur,
+            )
+        )
+
+        self.WINDOW.apply_settings(
+            WindowSettings(
+                window_dur = self.SETTINGS.output_window_dur, # sec
+                window_shift = self.SETTINGS.output_window_shift # sec
+            )
+        )
+
+
+    def network( self ) -> ez.NetworkDefinition:
+        return (
+            ( self.INPUT_SIGNAL, self.BPFILT.INPUT_SIGNAL ),
+            ( self.BPFILT.OUTPUT_SIGNAL, self.DECIMATE.INPUT_SIGNAL ),
+            ( self.DECIMATE.OUTPUT_SIGNAL, self.EWM.INPUT_SIGNAL ),
+            ( self.EWM.OUTPUT_SIGNAL, self.WINDOW.INPUT_SIGNAL ),
+            ( self.WINDOW.OUTPUT_SIGNAL, self.OUTPUT_SIGNAL )
+        )
+
+
+class HololightSystemSettings( ez.Settings ):
+    openbcisource_settings: OpenBCISourceSettings
+    decoder_settings: FBCSPSettings
+    demo_settings: HololightDemoSettings
+
+    preprocessing_settings: PreprocessingSettings = field(
+        default_factory = PreprocessingSettings
+    )
+
+class HololightSystem( ez.System ):
+
+    SETTINGS: HololightSystemSettings
+
+    SOURCE = OpenBCISource()
+    PREPROC = Preprocessing()
+    DECODER = FBCSP()
+    HOLOLIGHT = HololightDemo()
+
+    DEBUG = DebugLog()
+
+    def configure( self ) -> None:
+        self.SOURCE.apply_settings( self.SETTINGS.openbcisource_settings )
+        self.PREPROC.apply_settings( self.SETTINGS.preprocessing_settings )
+        self.DECODER.apply_settings( self.SETTINGS.decoder_settings )
+        self.HOLOLIGHT.apply_settings( self.SETTINGS.demo_settings )
+
+    def network( self ) -> ez.NetworkDefinition:
+        return ( 
+            ( self.SOURCE.OUTPUT_SIGNAL, self.PREPROC.INPUT_SIGNAL ),
+            ( self.PREPROC.OUTPUT_SIGNAL, self.DECODER.INPUT_SIGNAL ),
+            ( self.DECODER.OUTPUT_DECODE, self.HOLOLIGHT.INPUT_DECODE ),
+        )
+
+    def process_components( self ) -> Tuple[ ez.Component, ... ]:
+        return ( self.HOLOLIGHT, self.DECODER )
+
 
 if __name__ == "__main__":
     import argparse
@@ -80,27 +199,14 @@ if __name__ == "__main__":
     )
 
     ## Decoder Arguments
-    parser.add_argument(
-        '--classes',
-        type = int,
-        help = 'Number of classes in decoder.  Ignored if --model specified',
-        default = 2
+    parser.add_argument( 
+        '--session-dir',
+        type = lambda x: Path( x ),
+        help = "Directory to store samples and model checkpoints",
+        default = Path( '.' ) / 'test_session'
     )
 
-    parser.add_argument(
-        '--model',
-        type = lambda x: Path( x ).absolute(),
-        help = 'Path to pre-trained model file',
-        default = None
-    )
-
-    parser.add_argument(
-        '--output',
-        type = lambda x: Path( x ).absolute(),
-        help = 'Directory to save output files',
-        default = Path( '.' ) / "recordings"
-    )
-
+    # Demo Settings
     parser.add_argument(
         '--bridge',
         type = str,
@@ -124,9 +230,7 @@ if __name__ == "__main__":
     powerdown: str = args.powerdown
     impedance: bool = args.impedance
 
-    classes: int = args.classes
-    model: Optional[ Path ] = args.model
-    output: Path = args.output
+    session_dir: Path = args.session_dir
 
     bridge: Optional[ str ] = args.bridge
     cert: Path = args.cert
@@ -170,24 +274,19 @@ if __name__ == "__main__":
             )
         ),
 
-        decoder_settings = ShallowFBCSPDecoderSettings(
-            model_file = model
-        ),
-
-        modeltraining_settings = ModelTrainingSettings(
-
-            settings = ModelTrainingLogicSettings(
-                recording_dir = output 
+        decoder_settings = FBCSPSettings(
+            session_dir = session_dir,
+            trainingtaskserver_settings = TrainingTaskServerSettings(
+                cert = cert,
             ),
-
-            testsignal_settings = TestSignalInjectorSettings(
-                enabled = True if device == 'simulator' else False
+            inferencewindow_settings = WindowSettings(
+                window_dur = 3.0,
+                window_shift = 0.5
             ),
-
-            websocket_settings = WebsocketSettings(
-                host = "0.0.0.0",
-                port = 8083
-            )
+            samplemapper_settings = SampleMapperSettings(
+                test_signal = 1.0 # Add a test signal for classification
+            ),
+            class_names = [ 'REST', 'SELECT' ],
         ),
 
         demo_settings = HololightDemoSettings(
