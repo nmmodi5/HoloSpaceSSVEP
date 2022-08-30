@@ -2,6 +2,7 @@ import asyncio
 import http.server
 import ssl
 import logging
+import traceback
 
 from phue import Bridge, Light
 
@@ -45,12 +46,15 @@ class HololightDemo( ez.Unit ):
     INPUT_DECODE = ez.InputStream( ClassDecodeMessage )
 
     def initialize( self ) -> None:
-        bridge = Bridge( self.SETTINGS.bridge_host )
-        bridge.connect()
-        self.STATE.bridge = bridge
-        lights: List[ Light ] = self.STATE.bridge.lights
-        for light in lights:
-            light.on = False
+        try:
+            bridge = Bridge( self.SETTINGS.bridge_host )
+            bridge.connect()
+            self.STATE.bridge = bridge
+            lights: List[ Light ] = self.STATE.bridge.lights
+            for light in lights:
+                light.on = False
+        except:
+            logger.warn( f'Failed to connect to bridge. Traceback follows:\n{traceback.format_exc()}' )
 
     @ez.task
     async def start_websocket_server( self ) -> None:
@@ -73,19 +77,22 @@ class HololightDemo( ez.Unit ):
 
                         if value == 'START_MAPPING': # Perform Spatial Light Mapping
                             logger.info( 'Starting Light Mapping Sequence...' )
-                            lights: List[ Light ] = self.STATE.bridge.lights
-                            for light in lights:
-                                if not light.reachable: continue
+                            if self.STATE.bridge:
+                                lights: List[ Light ] = self.STATE.bridge.lights
+                                for light in lights:
+                                    if not light.reachable: continue
 
-                                logger.info( f'Asking client to locate {light.name}' )
-                                await websocket.send( f'LOCATE: {light.name}' )
+                                    logger.info( f'Asking client to locate {light.name}' )
+                                    await websocket.send( f'LOCATE: {light.name}' )
 
-                                blink_task = asyncio.create_task( blink_light( light ) )
-                                data = await websocket.recv() # Echo Light Name
-                                logger.info( f'Client responds {data}' )
-                                blink_task.cancel()
-                            
-                            logger.info( 'Light Mapping Sequence Complete' )
+                                    blink_task = asyncio.create_task( blink_light( light ) )
+                                    data = await websocket.recv() # Echo Light Name
+                                    logger.info( f'Client responds {data}' )
+                                    blink_task.cancel()
+                                
+                                logger.info( 'Light Mapping Sequence Complete' )
+                            else:
+                                logger.info( 'No bridge connected; light mapping cancelled' )
                             await websocket.send( 'RESULT: DONE_MAPPING' )
 
                     elif cmd == 'SELECT': # Select/Focus a light
@@ -130,7 +137,7 @@ class HololightDemo( ez.Unit ):
         cur_class = decode.data.argmax( axis = decode.class_dim )
         cur_prob = decode.data[ :, cur_class ]
 
-        logger.info( f'Decoder: {cur_class} @ {cur_prob}' )
+        # logger.debug( f'Decoder: {cur_class} @ {cur_prob}' )
 
         if self.STATE.decode_class is None:
             self.STATE.decode_class = cur_class
@@ -139,7 +146,7 @@ class HololightDemo( ez.Unit ):
             if cur_prob > self.SETTINGS.trigger_thresh:
                 self.STATE.decode_class = cur_class
                 if cur_class == self.SETTINGS.trigger_class:
-                    if self.STATE.focus_light is not None:
+                    if self.STATE.focus_light is not None and self.STATE.bridge:
                         try:
                             light: Light = self.STATE.bridge.lights_by_name[ self.STATE.focus_light ]
                             light.on = not light.on

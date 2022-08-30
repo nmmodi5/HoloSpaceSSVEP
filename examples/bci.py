@@ -34,6 +34,8 @@ class PreprocessingSettings( ez.Settings ):
     bpfilt_cuton: float = 5.0 # Hz
     bpfilt_cutoff: float = 30.0 # Hz
 
+    # X. TODO: Common Average Reference/Spatial Filtering
+
     # 2. Downsample
     downsample_factor: int = 4 # Downsample factor to reduce sampling rate to ~ 100 Hz
 
@@ -42,22 +44,10 @@ class PreprocessingSettings( ez.Settings ):
 
     # 4. Sliding Window
     output_window_dur: float = 1.0 # sec
-    # output_window_shift: float = 0.5 # sec
     output_window_shift: float = 1.0 # For training, we dont want overlap
 
 
 class Preprocessing( ez.Collection ):
-    """
-    Preprocessing pipeline for an EEG neural network decoder.
-
-    Preprocessing consists of:
-
-    1. Bandpass Filtering
-    X. TODO: Common Average Reference/Spatial Filtering
-    2. Downsampling
-    3. Exponentially Weighted Moving Standardization
-    4. Windowing
-    """
 
     SETTINGS: PreprocessingSettings
 
@@ -140,7 +130,12 @@ class HololightSystem( ez.System ):
         )
 
     def process_components( self ) -> Tuple[ ez.Component, ... ]:
-        return ( self.HOLOLIGHT, self.DECODER )
+        return ( 
+            self.HOLOLIGHT, 
+            self.DECODER, 
+            self.SOURCE, 
+            self.PREPROC 
+        )
 
 
 if __name__ == "__main__":
@@ -279,7 +274,8 @@ if __name__ == "__main__":
                 window_shift = 0.5
             ),
             samplemapper_settings = SampleMapperSettings(
-                test_signal = 1.0 # Add a test signal for classification
+                # Add a test signal for classification
+                test_signal = 1.0 if device == 'simulator' else 0.0 
             ),
             class_names = [ 'REST', 'SELECT' ],
         ),
