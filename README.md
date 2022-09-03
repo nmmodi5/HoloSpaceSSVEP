@@ -6,26 +6,20 @@
 $ python3 -m venv env
 $ source env/bin/activate
 (env) $ pip install --upgrade pip
-(env) $ pip install ../path/to/ezmsg
-(env) $ pip install ../path/to/ezbci
-(env) $ pip install -r requirements.txt
+(env) $ pip install -e ../path/to/ezmsg
+(env) $ pip install -e ../path/to/ezmsg/extensions/ezmsg-sigproc
+(env) $ pip install -e ../path/to/ezmsg/extensions/ezmsg-eeg
+(env) $ pip install -e .
+```
+
+The web frontend must be served with HTTPS. Create a certificate with the following command
+
+```bash
+openssl req -new -x509 -days 365 -nodes -out cert.pem -keyout cert.pem
 ```
 
 ## Run
+
 ```
 (env) $ python -m hololight.bci
 ```
-
-## TODO
-Hardware
-1. Assemble final hardware w/ head strap
-
-Software  
-1. Subprocess Train.py
-1. philips hue unit for single light control
-1. deploy to Pizero2
-
-### BONUS
-1. Dumb Web frontend for starting go-task and visualizing task
-1. SSVEP Signal Processing chain
-1. WebXR Task Frontend

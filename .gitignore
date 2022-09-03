@@ -143,4 +143,8 @@ cython_debug/
 # Project specific excludes
 train-data/
 recordings/
+test_session/
+cert.pem
 
+# Stupid stuff
+.DS_Store
