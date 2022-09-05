@@ -97,6 +97,7 @@ class Preprocessing( ez.Collection ):
             ( self.WINDOW.OUTPUT_SIGNAL, self.OUTPUT_SIGNAL )
         )
 
+# from ezmsg.testing.debuglog import DebugLog
 
 class HololightSystemSettings( ez.Settings ):
     openbcisource_settings: OpenBCISourceSettings
@@ -115,6 +116,7 @@ class HololightSystem( ez.System ):
     PREPROC = Preprocessing()
     DECODER = FBCSP()
     HOLOLIGHT = HololightDemo()
+    # DEBUG = DebugLog()
 
     def configure( self ) -> None:
         self.SOURCE.apply_settings( self.SETTINGS.openbcisource_settings )
@@ -127,6 +129,7 @@ class HololightSystem( ez.System ):
             ( self.SOURCE.OUTPUT_SIGNAL, self.PREPROC.INPUT_SIGNAL ),
             ( self.PREPROC.OUTPUT_SIGNAL, self.DECODER.INPUT_SIGNAL ),
             ( self.DECODER.OUTPUT_DECODE, self.HOLOLIGHT.INPUT_DECODE ),
+            # ( self.DECODER.OUTPUT_DECODE, self.DEBUG.INPUT ),
         )
 
     def process_components( self ) -> Tuple[ ez.Component, ... ]:
