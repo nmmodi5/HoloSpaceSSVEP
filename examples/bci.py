@@ -267,7 +267,7 @@ if __name__ == "__main__":
         decoder_settings = FBCSPSettings(
             session_dir = session_dir,
             trainingtaskserver_settings = TrainingTaskServerSettings(
-                cert = cert,
+                # cert = cert,
             ),
             inferencewindow_settings = WindowSettings(
                 window_dur = 3.0,
