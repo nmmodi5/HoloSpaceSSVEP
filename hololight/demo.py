@@ -102,7 +102,7 @@ class HololightDemo( ez.Unit ):
                     else:
                         logger.info( 'Received problematic message from websocket client: {data}')
 
-            except websockets.exceptions.ConnectionClosedOK:
+            except ( websockets.exceptions.ConnectionClosed ):
                 logger.info( 'Websocket Client Closed Connection' )
             except asyncio.CancelledError:
                 logger.info( 'Websocket Client Handler Task Cancelled!' )
@@ -137,7 +137,7 @@ class HololightDemo( ez.Unit ):
         cur_class = decode.data.argmax( axis = decode.class_dim )
         cur_prob = decode.data[ :, cur_class ]
 
-        # logger.debug( f'Decoder: {cur_class} @ {cur_prob}' )
+        logger.debug( f'Decoder: {cur_class} @ {cur_prob}' )
 
         if self.STATE.decode_class is None:
             self.STATE.decode_class = cur_class
