@@ -2,7 +2,6 @@ import asyncio
 import http.server
 import ssl
 import logging
-from tkinter import W
 import traceback
 
 from phue import Bridge, Light
