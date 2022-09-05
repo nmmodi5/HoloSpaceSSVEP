@@ -183,11 +183,11 @@ class GenerateDecodeOutput( ez.Unit ):
 
     @ez.publisher( OUTPUT_DECODE )
     async def generate( self ) -> AsyncGenerator:
-        output = np.array( [ True, False ] )
+        output = np.array( [ [ True, False ] ] )
         while True:
             out = ( output.astype( float ) * 0.9 ) + 0.05
             out /= out.sum()
-            yield self.OUTPUT_DECODE, ClassDecodeMessage( data = out )
+            yield self.OUTPUT_DECODE, ClassDecodeMessage( data = out, fs = 0.5 )
             await asyncio.sleep( 2.0 )
             output = ~output
 
