@@ -26,7 +26,7 @@ class HololightDemoSettings( ez.Settings ):
     cert: Path
     bridge_host: str
     host: str = '0.0.0.0'
-    port: int = 443
+    port: int = 8081
     ws_port: int = 8082
     trigger_class: int = 1
     trigger_thresh: float = 0.9
@@ -102,7 +102,7 @@ class HololightDemo( ez.Unit ):
                     else:
                         logger.info( 'Received problematic message from websocket client: {data}')
 
-            except websockets.exceptions.ConnectionClosedOK:
+            except ( websockets.exceptions.ConnectionClosed ):
                 logger.info( 'Websocket Client Closed Connection' )
             except asyncio.CancelledError:
                 logger.info( 'Websocket Client Handler Task Cancelled!' )
@@ -137,7 +137,7 @@ class HololightDemo( ez.Unit ):
         cur_class = decode.data.argmax( axis = decode.class_dim )
         cur_prob = decode.data[ :, cur_class ]
 
-        # logger.debug( f'Decoder: {cur_class} @ {cur_prob}' )
+        logger.debug( f'Decoder: {cur_class} @ {cur_prob}' )
 
         if self.STATE.decode_class is None:
             self.STATE.decode_class = cur_class
@@ -183,11 +183,11 @@ class GenerateDecodeOutput( ez.Unit ):
 
     @ez.publisher( OUTPUT_DECODE )
     async def generate( self ) -> AsyncGenerator:
-        output = np.array( [ True, False ] )
+        output = np.array( [ [ True, False ] ] )
         while True:
             out = ( output.astype( float ) * 0.9 ) + 0.05
             out /= out.sum()
-            yield self.OUTPUT_DECODE, ClassDecodeMessage( data = out )
+            yield self.OUTPUT_DECODE, ClassDecodeMessage( data = out, fs = 0.5 )
             await asyncio.sleep( 2.0 )
             output = ~output
 
