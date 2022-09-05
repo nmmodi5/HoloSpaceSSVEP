@@ -270,14 +270,14 @@ if __name__ == "__main__":
                 # cert = cert,
             ),
             inferencewindow_settings = WindowSettings(
-                window_dur = 3.0,
-                window_shift = 0.5
+                window_dur = 1.0,
+                window_shift = 1.0
             ),
             samplemapper_settings = SampleMapperSettings(
                 # Add a test signal for classification
                 test_signal = 1.0 if device == 'simulator' else 0.0 
             ),
-            class_names = [ 'REST', 'SELECT' ],
+            # class_names = [ 'REST', 'SELECT' ],
         ),
 
         demo_settings = HololightDemoSettings(
