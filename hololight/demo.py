@@ -26,7 +26,7 @@ class HololightDemoSettings( ez.Settings ):
     cert: Path
     bridge_host: str
     host: str = '0.0.0.0'
-    port: int = 443
+    port: int = 8081
     ws_port: int = 8082
     trigger_class: int = 1
     trigger_thresh: float = 0.9
