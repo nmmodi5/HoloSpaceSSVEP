@@ -15,7 +15,6 @@ from ezmsg.eeg.openbci import (
 )
 
 from ezmsg.fbcsp.tsplotter import TSMessagePlot
-from ezmsg.eeg.eegmessage import EEGMessage
 from ezmsg.sigproc.messages import TSMessage
 
 from ezmsg.sigproc.butterworthfilter import ButterworthFilter, ButterworthFilterSettings
@@ -27,7 +26,7 @@ class PlotServerSettings( ez.Settings ):
 
 class PlotServerState( ez.State ):
     raw_plot: TSMessagePlot = field( default_factory = TSMessagePlot )
-    filt_plot: TSMessagePlot = field( default_factory = TSMessagePlot )
+    # filt_plot: TSMessagePlot = field( default_factory = TSMessagePlot )
     cur_x: int = 0
 
 class PlotServer( ez.Unit ):
@@ -36,22 +35,22 @@ class PlotServer( ez.Unit ):
     STATE: PlotServerState
 
     INPUT_SIGNAL_RAW = ez.InputStream( TSMessage )
-    INPUT_SIGNAL_FILT = ez.InputStream( TSMessage )
+    # INPUT_SIGNAL_FILT = ez.InputStream( TSMessage )
 
     @ez.subscriber( INPUT_SIGNAL_RAW )
     async def on_signal( self, msg: TSMessage ) -> None:
         self.STATE.raw_plot.update( msg )
     
-    @ez.subscriber( INPUT_SIGNAL_FILT )
-    async def on_signal( self, msg: TSMessage ) -> None:
-        self.STATE.filt_plot.update( msg )
+    # @ez.subscriber( INPUT_SIGNAL_FILT )
+    # async def on_signal( self, msg: TSMessage ) -> None:
+    #     self.STATE.filt_plot.update( msg )
 
     @ez.task
     async def dashboard( self ) -> None:
         panel.serve( 
             dict(
                 raw = self.STATE.raw_plot.client_view,
-                filt = self.STATE.filt_plot.client_view
+                # filt = self.STATE.filt_plot.client_view
             ), 
             port = self.SETTINGS.port 
         )
@@ -94,15 +93,15 @@ class SignalVizSystem( ez.System ):
     def network( self ) -> ez.NetworkDefinition:
         return (
             ( self.SOURCE.OUTPUT_SIGNAL, self.BPFILT.INPUT_SIGNAL ),
-            ( self.BPFILT.OUTPUT_SIGNAL, self.SERVER.INPUT_SIGNAL_RAW ),
-            ( self.BPFILT.OUTPUT_SIGNAL, self.SERVER.INPUT_SIGNAL_FILT ),
+            ( self.SOURCE.OUTPUT_SIGNAL, self.SERVER.INPUT_SIGNAL_RAW ),
+            # ( self.BPFILT.OUTPUT_SIGNAL, self.SERVER.INPUT_SIGNAL_FILT ),
         )
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description = 'Hololight ARBCI Lightbulb Demonstration'
+        description = 'Signal Visualizer for OpenBCI (debug?)'
     )
 
     ## OpenBCI Arguments
@@ -181,7 +180,6 @@ if __name__ == "__main__":
     )
 
     settings = SignalVizSystemSettings(
-
         openbcisource_settings = OpenBCISourceSettings(
             device = device,
             blocksize = blocksize,
