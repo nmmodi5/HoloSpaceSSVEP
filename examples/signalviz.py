@@ -1,5 +1,12 @@
 from dataclasses import field
 import socket
+import logging
+
+logging.basicConfig(
+    format="%(asctime)s.%(msecs)03d %(levelname)s {%(module)s} [%(funcName)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.DEBUG,
+)
 
 import panel
 import ezmsg.core as ez
@@ -19,14 +26,13 @@ from ezmsg.sigproc.messages import TSMessage
 
 from ezmsg.sigproc.butterworthfilter import ButterworthFilter, ButterworthFilterSettings
 
-from typing import Dict
+from typing import Dict, Optional
 
 class PlotServerSettings( ez.Settings ):
     port: int = 8082
 
 class PlotServerState( ez.State ):
-    raw_plot: TSMessagePlot = field( default_factory = TSMessagePlot )
-    # filt_plot: TSMessagePlot = field( default_factory = TSMessagePlot )
+    plot: TSMessagePlot = field( default_factory = TSMessagePlot )
     cur_x: int = 0
 
 class PlotServer( ez.Unit ):
@@ -34,34 +40,29 @@ class PlotServer( ez.Unit ):
     SETTINGS: PlotServerSettings
     STATE: PlotServerState
 
-    INPUT_SIGNAL_RAW = ez.InputStream( TSMessage )
-    # INPUT_SIGNAL_FILT = ez.InputStream( TSMessage )
-
-    @ez.subscriber( INPUT_SIGNAL_RAW )
-    async def on_signal( self, msg: TSMessage ) -> None:
-        self.STATE.raw_plot.update( msg )
+    INPUT_SIGNAL = ez.InputStream( TSMessage )
     
-    # @ez.subscriber( INPUT_SIGNAL_FILT )
-    # async def on_signal( self, msg: TSMessage ) -> None:
-    #     self.STATE.filt_plot.update( msg )
+    @ez.subscriber( INPUT_SIGNAL )
+    async def on_signal( self, msg: TSMessage ) -> None:
+        self.STATE.plot.update( msg )
 
     @ez.task
     async def dashboard( self ) -> None:
         panel.serve( 
-            dict(
-                raw = self.STATE.raw_plot.client_view,
-                # filt = self.STATE.filt_plot.client_view
-            ), 
+            self.STATE.plot.client_view,
             port = self.SETTINGS.port,
             websocket_origin = [
                 f'localhost:{self.SETTINGS.port}',
                 f'{socket.gethostname()}:{self.SETTINGS.port}'
-            ]
+            ],
+            show = False
         )
 
 
 class SignalVizSystemSettings( ez.Settings ):
     openbcisource_settings: OpenBCISourceSettings
+    cuton: Optional[ float ] = None
+    cutoff: Optional[ float ] = None
     server_settings: PlotServerSettings = field(
         default_factory = PlotServerSettings
     )
@@ -84,8 +85,8 @@ class SignalVizSystem( ez.System ):
         self.BPFILT.apply_settings(
             ButterworthFilterSettings(
                 order = 5,
-                cuton = 5,
-                cutoff = None
+                cuton = self.SETTINGS.cuton,
+                cutoff = self.SETTINGS.cutoff
             )
         )
 
@@ -97,8 +98,7 @@ class SignalVizSystem( ez.System ):
     def network( self ) -> ez.NetworkDefinition:
         return (
             ( self.SOURCE.OUTPUT_SIGNAL, self.BPFILT.INPUT_SIGNAL ),
-            ( self.SOURCE.OUTPUT_SIGNAL, self.SERVER.INPUT_SIGNAL_RAW ),
-            # ( self.BPFILT.OUTPUT_SIGNAL, self.SERVER.INPUT_SIGNAL_FILT ),
+            ( self.BPFILT.OUTPUT_SIGNAL, self.SERVER.INPUT_SIGNAL ),
         )
 
 if __name__ == "__main__":
@@ -151,6 +151,20 @@ if __name__ == "__main__":
         default = False
     )
 
+    parser.add_argument(
+        '--cuton',
+        type = float,
+        help = 'Filter cuton',
+        default = None
+    )
+
+    parser.add_argument(
+        '--cutoff',
+        type = float,
+        help = 'Filter cutoff',
+        default = None
+    )
+
     args = parser.parse_args()
 
     device: str = args.device
@@ -159,6 +173,8 @@ if __name__ == "__main__":
     bias: str = args.bias
     powerdown: str = args.powerdown
     impedance: bool = args.impedance
+    cuton: Optional[ float ] = args.cuton
+    cutoff: Optional[ float ] = args.cutoff
 
     gain_map: Dict[ int, GainState ] = {
         1:  GainState.GAIN_1,
@@ -194,6 +210,8 @@ if __name__ == "__main__":
                 ] )
             )
         ),
+        cuton = cuton,
+        cutoff = cutoff,
     )
 
     system = SignalVizSystem( settings )
