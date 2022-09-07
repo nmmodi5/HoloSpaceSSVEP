@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import field
+import socket
 
 import panel
 import ezmsg.core as ez
@@ -19,7 +19,7 @@ from ezmsg.sigproc.messages import TSMessage
 
 from ezmsg.sigproc.butterworthfilter import ButterworthFilter, ButterworthFilterSettings
 
-from typing import Dict, Optional, Any, Tuple
+from typing import Dict
 
 class PlotServerSettings( ez.Settings ):
     port: int = 8082
@@ -52,7 +52,11 @@ class PlotServer( ez.Unit ):
                 raw = self.STATE.raw_plot.client_view,
                 # filt = self.STATE.filt_plot.client_view
             ), 
-            port = self.SETTINGS.port 
+            port = self.SETTINGS.port,
+            websocket_origin = [
+                f'localhost:{self.SETTINGS.port}',
+                f'{socket.gethostname()}:{self.SETTINGS.port}'
+            ]
         )
 
 
