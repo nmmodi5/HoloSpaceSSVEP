@@ -33,7 +33,6 @@ class PlotServerSettings( ez.Settings ):
 
 class PlotServerState( ez.State ):
     plot: TSMessagePlot = field( default_factory = TSMessagePlot )
-    cur_x: int = 0
 
 class PlotServer( ez.Unit ):
 
@@ -49,7 +48,7 @@ class PlotServer( ez.Unit ):
     @ez.task
     async def dashboard( self ) -> None:
         panel.serve( 
-            self.STATE.plot.client_view,
+            self.STATE.plot.client,
             port = self.SETTINGS.port,
             websocket_origin = [
                 f'localhost:{self.SETTINGS.port}',
