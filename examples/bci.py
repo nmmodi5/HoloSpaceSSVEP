@@ -279,7 +279,7 @@ if __name__ == "__main__":
                 # cert = cert,
             ),
             inferencewindow_settings = WindowSettings(
-                window_dur = 1.0,
+                window_dur = 3.0,
                 window_shift = 1.0
             ),
             samplemapper_settings = SampleMapperSettings(
