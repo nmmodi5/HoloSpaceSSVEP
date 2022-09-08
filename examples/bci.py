@@ -16,6 +16,7 @@ from ezmsg.eeg.openbci import (
 from ezmsg.fbcsp.decoder import FBCSP, FBCSPSettings
 from ezmsg.fbcsp.samplemapper import SampleMapperSettings
 from ezmsg.fbcsp.trainingtask.server import TrainingTaskServerSettings
+from ezmsg.fbcsp.tsmessageplot import TSMessagePlot, TSMessagePlotSettings
 
 from ezmsg.eeg.eegmessage import EEGMessage
 
@@ -111,6 +112,7 @@ class HololightSystem( ez.System ):
     SETTINGS: HololightSystemSettings
 
     SOURCE = OpenBCISource()
+    SOURCE_PLOT = TSMessagePlot()
     PREPROC = Preprocessing()
     DECODER = FBCSP()
     HOLOLIGHT = HololightDemo()
@@ -121,9 +123,17 @@ class HololightSystem( ez.System ):
         self.DECODER.apply_settings( self.SETTINGS.decoder_settings )
         self.HOLOLIGHT.apply_settings( self.SETTINGS.demo_settings )
 
+        self.SOURCE_PLOT.apply_settings( 
+            TSMessagePlotSettings(
+                name = 'OpenBCI Cyton Source',
+                port = 8086
+            )
+        )
+
     def network( self ) -> ez.NetworkDefinition:
         return ( 
             ( self.SOURCE.OUTPUT_SIGNAL, self.PREPROC.INPUT_SIGNAL ),
+            ( self.SOURCE.OUTPUT_SIGNAL, self.SOURCE_PLOT.INPUT_SIGNAL ),
             ( self.PREPROC.OUTPUT_SIGNAL, self.DECODER.INPUT_SIGNAL ),
             ( self.DECODER.OUTPUT_DECODE, self.HOLOLIGHT.INPUT_DECODE ),
         )
@@ -133,7 +143,8 @@ class HololightSystem( ez.System ):
             self.HOLOLIGHT, 
             self.DECODER, 
             self.SOURCE, 
-            self.PREPROC 
+            self.PREPROC,
+            self.SOURCE_PLOT
         )
 
 
@@ -207,7 +218,6 @@ if __name__ == "__main__":
         '--cert',
         type = lambda x: Path( x ),
         help = "Certificate file for frontend server",
-        default = ( Path( '.' ) / 'cert.pem' ).absolute()
     )
 
     args = parser.parse_args()
