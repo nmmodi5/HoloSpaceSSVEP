@@ -32,8 +32,8 @@ from hololight.demo import HololightDemo, HololightDemoSettings
 class PreprocessingSettings( ez.Settings ):
     # 1. Bandpass Filter
     bpfilt_order: int = 5
-    bpfilt_cuton: float = 5.0 # Hz
-    bpfilt_cutoff: float = 30.0 # Hz
+    bpfilt_cuton: float = 1.0 # Hz
+    bpfilt_cutoff: float = 45.0 # Hz
 
     # X. TODO: Common Average Reference/Spatial Filtering
 
