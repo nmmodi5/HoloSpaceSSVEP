@@ -17,6 +17,7 @@ from ezmsg.fbcsp.decoder import FBCSP, FBCSPSettings
 from ezmsg.fbcsp.samplemapper import SampleMapperSettings
 from ezmsg.fbcsp.trainingtask.server import TrainingTaskServerSettings
 from ezmsg.fbcsp.tsmessageplot import TSMessagePlot, TSMessagePlotSettings
+from ezmsg.fbcsp.panelapplication import Application, ApplicationSettings
 
 from ezmsg.eeg.eegmessage import EEGMessage
 
@@ -116,6 +117,7 @@ class HololightSystem( ez.System ):
     PREPROC = Preprocessing()
     DECODER = FBCSP()
     HOLOLIGHT = HololightDemo()
+    APP = Application()
 
     def configure( self ) -> None:
         self.SOURCE.apply_settings( self.SETTINGS.openbcisource_settings )
@@ -125,10 +127,19 @@ class HololightSystem( ez.System ):
 
         self.SOURCE_PLOT.apply_settings( 
             TSMessagePlotSettings(
-                name = 'OpenBCI Cyton Source',
-                port = 8086
+                name = 'OpenBCI Cyton Source'
             )
         )
+
+        self.APP.apply_settings(
+            ApplicationSettings(
+                port = 8083,
+                name = 'Hololight Dashboard'
+            )
+        )
+
+        self.APP.panels = self.DECODER.panels()
+        self.APP.panels['source'] = self.SOURCE_PLOT.GUI.panel
 
     def network( self ) -> ez.NetworkDefinition:
         return ( 
@@ -141,10 +152,8 @@ class HololightSystem( ez.System ):
     def process_components( self ) -> Tuple[ ez.Component, ... ]:
         return ( 
             self.HOLOLIGHT, 
-            self.DECODER, 
             self.SOURCE, 
             self.PREPROC,
-            self.SOURCE_PLOT
         )
 
 
@@ -275,9 +284,6 @@ if __name__ == "__main__":
 
         decoder_settings = FBCSPSettings(
             session_dir = session_dir,
-            trainingtaskserver_settings = TrainingTaskServerSettings(
-                # cert = cert,
-            ),
             inferencewindow_settings = WindowSettings(
                 window_dur = 3.0,
                 window_shift = 1.0
@@ -286,7 +292,7 @@ if __name__ == "__main__":
                 # Add a test signal for classification
                 test_signal = 1.0 if device == 'simulator' else 0.0 
             ),
-            # class_names = [ 'REST', 'SELECT' ],
+            application_port = None,
         ),
 
         demo_settings = HololightDemoSettings(
