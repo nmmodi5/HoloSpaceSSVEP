@@ -15,7 +15,6 @@ from ezmsg.eeg.openbci import (
 
 from ezmsg.fbcsp.decoder import FBCSP, FBCSPSettings
 from ezmsg.fbcsp.samplemapper import SampleMapperSettings
-from ezmsg.fbcsp.trainingtask.server import TrainingTaskServerSettings
 from ezmsg.fbcsp.tsmessageplot import TSMessagePlot, TSMessagePlotSettings
 from ezmsg.fbcsp.panelapplication import Application, ApplicationSettings
 
