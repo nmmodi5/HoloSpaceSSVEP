@@ -43,10 +43,6 @@ class PreprocessingSettings( ez.Settings ):
     # 3. Exponentially Weighted Standardization
     ewm_history_dur: float = 2.0 # sec
 
-    # 4. Sliding Window
-    output_window_dur: float = 1.0 # sec
-    output_window_shift: float = 1.0 # For training, we dont want overlap
-
 
 class Preprocessing( ez.Collection ):
 
@@ -81,21 +77,12 @@ class Preprocessing( ez.Collection ):
             )
         )
 
-        self.WINDOW.apply_settings(
-            WindowSettings(
-                window_dur = self.SETTINGS.output_window_dur, # sec
-                window_shift = self.SETTINGS.output_window_shift # sec
-            )
-        )
-
-
     def network( self ) -> ez.NetworkDefinition:
         return (
             ( self.INPUT_SIGNAL, self.BPFILT.INPUT_SIGNAL ),
             ( self.BPFILT.OUTPUT_SIGNAL, self.DECIMATE.INPUT_SIGNAL ),
             ( self.DECIMATE.OUTPUT_SIGNAL, self.EWM.INPUT_SIGNAL ),
-            ( self.EWM.OUTPUT_SIGNAL, self.WINDOW.INPUT_SIGNAL ),
-            ( self.WINDOW.OUTPUT_SIGNAL, self.OUTPUT_SIGNAL )
+            ( self.EWM.OUTPUT_SIGNAL, self.OUTPUT_SIGNAL )
         )
 
 class HololightSystemSettings( ez.Settings ):
@@ -284,8 +271,8 @@ if __name__ == "__main__":
         decoder_settings = FBCSPSettings(
             session_dir = session_dir,
             inferencewindow_settings = WindowSettings(
-                window_dur = 3.0,
-                window_shift = 1.0
+                window_dur = 1.0,
+                window_shift = 0.5
             ),
             samplemapper_settings = SampleMapperSettings(
                 # Add a test signal for classification
