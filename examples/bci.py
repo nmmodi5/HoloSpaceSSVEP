@@ -55,7 +55,6 @@ class Preprocessing( ez.Collection ):
     BPFILT = ButterworthFilter()
     DECIMATE = Decimate()
     EWM = EWMFilter()
-    WINDOW = Window()
 
     def configure( self ) -> None:
         self.BPFILT.apply_settings(
