@@ -49,10 +49,10 @@ class HololightDemo( ez.Unit ):
         try:
             bridge = Bridge( self.SETTINGS.bridge_host )
             bridge.connect()
-            self.STATE.bridge = bridge
-            lights: List[ Light ] = self.STATE.bridge.lights
+            lights: List[ Light ] = bridge.lights
             for light in lights:
                 light.on = False
+            self.STATE.bridge = bridge
         except:
             logger.warn( f'Failed to connect to bridge. Traceback follows:\n{traceback.format_exc()}' )
 
@@ -93,6 +93,14 @@ class HololightDemo( ez.Unit ):
                                 logger.info( 'Light Mapping Sequence Complete' )
                             else:
                                 logger.info( 'No bridge connected; light mapping cancelled' )
+
+                                ## DEBUG
+                                # logger.info( 'No bridge connected; testing with two bulbs')
+                                # for light in [ 'test1', 'test2' ]:
+                                #     await websocket.send( f'LOCATE: {light}' )
+                                #     data = await websocket.recv()
+                                #     logger.info( f'Client responds {data}' )
+
                             await websocket.send( 'RESULT: DONE_MAPPING' )
 
                     elif cmd == 'SELECT': # Select/Focus a light
