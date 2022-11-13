@@ -50,6 +50,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       import {Renderer, createWebGLContext} from './js/render/core/renderer.js';
       import {Node} from './js/render/core/node.js';
       import {Gltf2Node} from './js/render/nodes/gltf2.js';
+      import {ButtonNodeIcon} from './js/render/nodes/button-static.js';
       import {DropShadowNode} from './js/render/nodes/drop-shadow.js';
       import {vec3} from './js/render/math/gl-matrix.js';
       import {Ray} from './js/render/math/ray.js';
@@ -59,6 +60,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       let xrRefSpace = null;
       let xrViewerSpace = null;
       let xrHitTestSource = null;
+      let xrGLFactory = null;
 
       let ws_global;
 
@@ -72,23 +74,16 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       arObject.visible = false;
       scene.addNode(arObject);
 
-      let flower = new Gltf2Node({url: 'assets/reticle.gltf'});
-      vec3.set(flower.scale, 0.5, 0.5, 0.5);
-
-      // Navin - Add your object to the node.
+      //let flower = new Gltf2Node({url: 'assets/reticle.gltf'});
+      let flower = new ButtonNodeIcon();
+      vec3.set(flower.scale, 1.5, 1.5, 1.5);
       arObject.addNode(flower);
 
       let reticle = new Gltf2Node({url: 'assets/reticle.gltf'});
       reticle.visible = false;
       scene.addNode(reticle);
 
-      // Having a really simple drop shadow underneath an object helps ground
-      // it in the world without adding much complexity.
-      let shadow = new DropShadowNode();
-      vec3.set(shadow.scale, 0.15, 0.15, 0.15);
-      arObject.addNode(shadow);
-
-      const MAX_FLOWERS = 30;
+      const MAX_FLOWERS = 4;
       let flowers = [];
 
       let light_mapping = false;
@@ -137,6 +132,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
           scene.setRenderer(renderer);
         }
+
+        xrGLFactory = new XRWebGLBinding(session, gl);
 
         session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
 
@@ -200,7 +197,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       // Navin - event listener added to session
       // This in turn adds the ARObject Flower
       function onSelect(event) {
-        if (reticle.visible && map_light) {
+        if (reticle.visible) {
           // The reticle should already be positioned at the latest hit point, 
           // so we can just use it's matrix to save an unnecessary call to 
           // event.frame.getHitTestResults.

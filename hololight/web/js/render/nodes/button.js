@@ -121,7 +121,7 @@ export class ButtonNode extends Node {
     super();
 
     // All buttons are selectable by default.
-    this.selectable = true;
+    this.selectable = false;
 
     this._selectHandler = callback;
     this._iconTexture = iconTexture;
