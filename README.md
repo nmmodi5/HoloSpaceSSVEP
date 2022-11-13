@@ -22,5 +22,5 @@ openssl req -new -x509 -days 365 -nodes -out cert.pem -keyout cert.pem
 ## Run
 
 ```
-(env) $ 		○ python -m hololight.demo --cert ..\cert.pem
+(env) $ python -m hololight.demo --cert ..\cert.pem
 ```
