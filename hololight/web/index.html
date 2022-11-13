@@ -73,7 +73,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       scene.addNode(arObject);
 
       let flower = new Gltf2Node({url: 'assets/reticle.gltf'});
-      vec3.set( flower.scale, 0.5, 0.5, 0.5 );
+      vec3.set(flower.scale, 0.5, 0.5, 0.5);
+
+      // Navin - Add your object to the node.
       arObject.addNode(flower);
 
       let reticle = new Gltf2Node({url: 'assets/reticle.gltf'});
@@ -170,6 +172,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         xrButton.setSession(null);
       }
 
+      // DELME COMMENT
+      // Navin - Copy this function to create your own
+      // addBlinkingMeshAt()
       // Adds a new object to the scene at the
       // specified transform.
       function addARObjectAt(matrix) {
@@ -191,6 +196,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         return newFlower
       }
 
+      // DELME COMMENT
+      // Navin - event listener added to session
+      // This in turn adds the ARObject Flower
       function onSelect(event) {
         if (reticle.visible && map_light) {
           // The reticle should already be positioned at the latest hit point, 
