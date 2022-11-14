@@ -85,6 +85,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
       const MAX_FLOWERS = 4;
       let flowers = [];
+      let frequency = [6, 9, 12, 15]; // should be of length MAX_FLOWERS
+      let startTime = [0, 0, 0, 0]; // should be of length MAX_FLOWERS
+      let index = [0, 0, 0, 0]; // should be of length MAX_FLOWERS
+      let visibility = [true, false];
+      let runTime = 10000; // total time of flashing, in milliseconds
 
       let light_mapping = false;
       let map_light = null;
@@ -188,8 +193,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         if (flowers.length > MAX_FLOWERS) {
           let oldFlower = flowers.shift();
           scene.removeNode(oldFlower);
+          let old_freq = frequency.shift();
+          frequency[MAX_FLOWERS] = old_freq;
         }
-
         return newFlower
       }
 
@@ -232,6 +238,19 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         session.requestAnimationFrame(onXRFrame);
 
         scene.drawXRFrame(frame, pose);
+
+        // blink flowers
+        flowers.forEach(function(flower, i) {
+          if (!startTime[i]) { startTime[i] = t; }
+            const elapsed = t - startTime[i];
+            const interval = Math.floor(1000/frequency[i]);   
+            if (elapsed > interval) {
+              startTime[i] = t;
+              index[i] = ++(index[i])%2;
+              flower.visible = visibility[index[i]];
+              console.log(i, " ", count[i]++);
+            }
+        })
 
         // Determine closest flower to reticle
         let closestFlowerDistance = null;
