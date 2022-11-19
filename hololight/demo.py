@@ -100,7 +100,7 @@ class HololightDemo( ez.Unit ):
                                 #     await websocket.send( f'LOCATE: {light}' )
                                 #     data = await websocket.recv()
                                 #     logger.info( f'Client responds {data}' )
-
+                            # Navin - On message in webxr (send result)
                             await websocket.send( 'RESULT: DONE_MAPPING' )
 
                     elif cmd == 'SELECT': # Select/Focus a light
@@ -138,7 +138,7 @@ class HololightDemo( ez.Unit ):
         finally:
             logger.info( 'Closing Websocket Server' )
 
-
+    ## this contains decoding logic
     @ez.subscriber( INPUT_DECODE )
     async def on_decode( self, decode: ClassDecodeMessage ) -> None:
 
@@ -186,11 +186,13 @@ class HololightDemo( ez.Unit ):
 ### DEV/TEST APPARATUS
 
 class GenerateDecodeOutput( ez.Unit ):
-
+    ### ClassDecodeMessage gets the decoded message
     OUTPUT_DECODE = ez.OutputStream( ClassDecodeMessage )
 
     @ez.publisher( OUTPUT_DECODE )
     async def generate( self ) -> AsyncGenerator:
+        ## 4 classes, one hot encoding
+        ## output is the decoded output
         output = np.array( [ [ True, False ] ] )
         while True:
             out = ( output.astype( float ) * 0.9 ) + 0.05

@@ -25,7 +25,6 @@ import {PrimitiveStream} from '../geometry/primitive-stream.js';
 const BUTTON_SIZE = 0.1;
 const BUTTON_CORNER_RADIUS = 0.025;
 const BUTTON_CORNER_SEGMENTS = 8;
-const BUTTON_LAYER_DISTANCE = 0.005;
 const BUTTON_COLOR = 0;
 const BUTTON_ALPHA = 1.0;
 const BUTTON_HOVER_SCALE = 1.1;
@@ -52,7 +51,7 @@ class ButtonMaterial extends Material {
 
     vec4 vertex_main(mat4 proj, mat4 view, mat4 model) {
       float scale = mix(1.0, ${BUTTON_HOVER_SCALE}, hoverAmount);
-      vec4 pos = vec4(POSITION.x * scale, POSITION.y * scale, POSITION.z * (scale + (hoverAmount * 0.2)), 1.0);
+      vec4 pos = vec4(POSITION.x * scale, POSITION.y * scale, POSITION.z * scale, 1.0);
       return proj * view * model * pos;
     }`;
   }
@@ -61,7 +60,7 @@ class ButtonMaterial extends Material {
     return `
     uniform float hoverAmount;
 
-    const vec4 default_color = vec4(${BUTTON_COLOR+1}, ${BUTTON_COLOR}, ${BUTTON_COLOR}, ${BUTTON_ALPHA});
+    const vec4 default_color = vec4(${BUTTON_COLOR+1}, ${BUTTON_COLOR+1}, ${BUTTON_COLOR+1}, ${BUTTON_ALPHA});
 
     vec4 fragment_main() {
       return mix(default_color, default_color, hoverAmount);
@@ -70,14 +69,12 @@ class ButtonMaterial extends Material {
 }
 
 export class ButtonNodeIcon extends Node {
-  constructor(iconTexture, callback) {
+  constructor() {
     super();
   }
 
   onRendererChanged(renderer) {
     let stream = new PrimitiveStream();
-
-    let hd = BUTTON_LAYER_DISTANCE * 0.5;
 
     // Build a rounded rect for the background.
     let hs = BUTTON_SIZE * 0.5;
@@ -89,31 +86,31 @@ export class ButtonNodeIcon extends Node {
     for (let i = 0; i < segments; ++i) {
       let rad = i * ((Math.PI * 2.0) / segments);
       let x = Math.cos(rad) * BUTTON_CORNER_RADIUS;
-      let y = Math.sin(rad) * BUTTON_CORNER_RADIUS;
+      let z = Math.sin(rad) * BUTTON_CORNER_RADIUS;
       let section = Math.floor(i / BUTTON_CORNER_SEGMENTS);
       switch (section) {
         case 0:
           x += ihs;
-          y += ihs;
+          z += ihs;
           break;
         case 1:
           x -= ihs;
-          y += ihs;
+          z += ihs;
           break;
         case 2:
           x -= ihs;
-          y -= ihs;
+          z -= ihs; 
           break;
         case 3:
           x += ihs;
-          y -= ihs;
+          z -= ihs;
           break;
       }
 
-      stream.pushVertex(x, y, -hd, 0, 0, 0, 0, 1);
+      stream.pushVertex(x, 0, z, 0, 0, 0, 1, 0);
 
       if (i > 1) {
-        stream.pushTriangle(0, i-1, i);
+        stream.pushTriangle(i-1, 0, i);
       }
     }
 
@@ -122,5 +119,19 @@ export class ButtonNodeIcon extends Node {
     let buttonPrimitive = stream.finishPrimitive(renderer);
     this._buttonRenderPrimitive = renderer.createRenderPrimitive(buttonPrimitive, new ButtonMaterial());
     this.addRenderPrimitive(this._buttonRenderPrimitive);
+  }
+
+  // Navin - use this function for blinking simulation 
+  // of the button instead of visible toggle
+  onUpdate(timestamp, frameDelta) {
+    /* if (!startTime[i]) { startTime[i] = t; }
+    const elapsed = t - startTime[i];
+    const interval = Math.floor(1000/frequency[i]);   
+    if (elapsed > interval) {
+      startTime[i] = t;
+      index[i] = ++(index[i])%2;
+      quad.visible = visibility[index[i]];
+      console.log(i, " ", count[i]++);
+    } */
   }
 }

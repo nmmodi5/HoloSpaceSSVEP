@@ -74,26 +74,26 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       arObject.visible = false;
       scene.addNode(arObject);
 
-      //let flower = new Gltf2Node({url: 'assets/reticle.gltf'});
-      let flower = new ButtonNodeIcon();
-      vec3.set(flower.scale, 1.5, 1.5, 1.5);
-      arObject.addNode(flower);
+      //let quad = new Gltf2Node({url: 'assets/reticle.gltf'});
+      let quad = new ButtonNodeIcon();
+      vec3.set(quad.scale, 2, 2, 2);
+      arObject.addNode(quad);
 
       let reticle = new Gltf2Node({url: 'assets/reticle.gltf'});
       reticle.visible = false;
       scene.addNode(reticle);
 
-      const MAX_FLOWERS = 4;
-      let flowers = [];
-      let frequency = [6, 9, 12, 15]; // should be of length MAX_FLOWERS
-      let startTime = [0, 0, 0, 0]; // should be of length MAX_FLOWERS
-      let index = [0, 0, 0, 0]; // should be of length MAX_FLOWERS
+      const MAX_QUADS = 4;
+      let quads = [];
+      let frequency = [6, 9, 12, 15]; // should be of length MAX_QUADS
+      let startTime = [0, 0, 0, 0]; // should be of length MAX_QUADS
+      let index = [0, 0, 0, 0]; // should be of length MAX_QUADS
       let visibility = [true, false];
       let runTime = 10000; // total time of flashing, in milliseconds
 
       let light_mapping = false;
       let map_light = null;
-      let sel_flower = null;
+      let sel_quad = null;
 
       // Ensure the background is transparent for AR.
       scene.clear = false;
@@ -176,42 +176,42 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
       // DELME COMMENT
       // Navin - Copy this function to create your own
-      // addBlinkingMeshAt()
       // Adds a new object to the scene at the
       // specified transform.
       function addARObjectAt(matrix) {
-        let newFlower = arObject.clone();
-        newFlower.visible = true;
-        newFlower.matrix = matrix;
-        scene.addNode(newFlower);
+        let newquad = arObject.clone();
+        newquad.frequency = 10;
+        newquad.visible = true;
+        newquad.matrix = matrix;
+        scene.addNode(newquad);
 
-        flowers.push(newFlower);
+        quads.push(newquad);
 
         // For performance reasons if we add too many objects start
         // removing the oldest ones to keep the scene complexity
         // from growing too much.
-        if (flowers.length > MAX_FLOWERS) {
-          let oldFlower = flowers.shift();
-          scene.removeNode(oldFlower);
+        if (quads.length > MAX_QUADS) {
+          let oldquad = quads.shift();
+          scene.removeNode(oldquad);
           let old_freq = frequency.shift();
-          frequency[MAX_FLOWERS] = old_freq;
+          frequency[MAX_QUADS-1] = old_freq;
         }
-        return newFlower
+        return newquad
       }
 
       // DELME COMMENT
       // Navin - event listener added to session
-      // This in turn adds the ARObject Flower
+      // This in turn adds the ARObject quad
       function onSelect(event) {
         if (reticle.visible) {
           // The reticle should already be positioned at the latest hit point, 
           // so we can just use it's matrix to save an unnecessary call to 
           // event.frame.getHitTestResults.
-          flower = addARObjectAt(reticle.matrix);
-          flower.light = map_light;
+          quad = addARObjectAt(reticle.matrix);
+          quad.light = map_light;
           map_light = null;
 
-          ws_global.send( `MAPPED: ${flower.light}` )
+          ws_global.send( `MAPPED: ${quad.light}` )
         }
       }
 
@@ -239,41 +239,40 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
         scene.drawXRFrame(frame, pose);
 
-        // blink flowers
-        flowers.forEach(function(flower, i) {
+        // blink quads
+        quads.forEach(function(quad, i) {
           if (!startTime[i]) { startTime[i] = t; }
             const elapsed = t - startTime[i];
             const interval = Math.floor(1000/frequency[i]);   
             if (elapsed > interval) {
               startTime[i] = t;
               index[i] = ++(index[i])%2;
-              flower.visible = visibility[index[i]];
-              console.log(i, " ", count[i]++);
+              quad.visible = visibility[index[i]];
             }
         })
 
-        // Determine closest flower to reticle
-        let closestFlowerDistance = null;
-        let closestFlower = null;
-        flowers.forEach(function(flower, i) {
+        // Determine closest quad to reticle
+        let closestquadDistance = null;
+        let closestquad = null;
+        quads.forEach(function(quad, i) {
 
           let distance = Math.hypot(
-            reticle.matrix[12] - flower.matrix[12],
-            reticle.matrix[13] - flower.matrix[13],
-            reticle.matrix[14] - flower.matrix[14],
+            reticle.matrix[12] - quad.matrix[12],
+            reticle.matrix[13] - quad.matrix[13],
+            reticle.matrix[14] - quad.matrix[14],
           )
 
           if (distance <= 0.33)
-            if (closestFlower == null || closestFlowerDistance > distance) { 
-              closestFlower = flower;
-              closestFlowerDistance = distance;
+            if (closestquad == null || closestquadDistance > distance) { 
+              closestquad = quad;
+              closestquadDistance = distance;
             }
         })
 
-        if (closestFlower != sel_flower) {
-          sel_flower = closestFlower;
+        if (closestquad != sel_quad) {
+          sel_quad = closestquad;
           if(!light_mapping)
-            ws_global.send(`SELECT: ${sel_flower == null ? "null" : closestFlower.light}`);
+            ws_global.send(`SELECT: ${sel_quad == null ? "null" : closestquad.light}`);
         }
 
         scene.endFrame();
