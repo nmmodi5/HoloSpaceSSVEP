@@ -74,10 +74,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       arObject.visible = false;
       scene.addNode(arObject);
 
-      //let quad = new Gltf2Node({url: 'assets/reticle.gltf'});
       let quad = new ButtonNodeIcon();
       vec3.set(quad.scale, 2, 2, 2);
       arObject.addNode(quad);
+
+      let flower = new Gltf2Node({url: 'assets/sunflower.gltf'});
+      flower.visible = false;
+      scene.addNode(flower);
 
       let reticle = new Gltf2Node({url: 'assets/reticle.gltf'});
       reticle.visible = false;
@@ -85,11 +88,16 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
       const MAX_QUADS = 4;
       let quads = [];
-      let frequency = [6, 9, 12, 15]; // should be of length MAX_QUADS
+      let frequency = [8, 10, 12, 15]; // should be of length MAX_QUADS
       let startTime = [0, 0, 0, 0]; // should be of length MAX_QUADS
       let index = [0, 0, 0, 0]; // should be of length MAX_QUADS
       let visibility = [true, false];
       let runTime = 10000; // total time of flashing, in milliseconds
+      let selectionTime = 10000; // wait for first 10 seconds for user to select SSVEP location
+      //let firstQuadSelectStartTime = 0 // set only first time 1st quad starts blinking.
+      let integrationStartTime = 0; // set when integration time starts
+      let startSSVEPDecodeMessageFlag = false;
+      let flowerDisplayTime = 2000 // display the flower at decoded location for 2000 ms
 
       let light_mapping = false;
       let map_light = null;
@@ -158,10 +166,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
           session.requestAnimationFrame(onXRFrame);
         });
-
-        console.log( "Starting Light Mapping!" );
-        ws_global.send( 'COMMAND: START_MAPPING' );
-        light_mapping = true;
       }
 
       function onEndSession(session) {
@@ -174,20 +178,16 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         xrButton.setSession(null);
       }
 
-      // DELME COMMENT
-      // Navin - Copy this function to create your own
       // Adds a new object to the scene at the
       // specified transform.
       function addARObjectAt(matrix) {
         let newquad = arObject.clone();
-        newquad.frequency = 10;
         newquad.visible = true;
         newquad.matrix = matrix;
         scene.addNode(newquad);
-
         quads.push(newquad);
 
-        // For performance reasons if we add too many objects start
+        /* // For performance reasons if we add too many objects start
         // removing the oldest ones to keep the scene complexity
         // from growing too much.
         if (quads.length > MAX_QUADS) {
@@ -195,23 +195,28 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           scene.removeNode(oldquad);
           let old_freq = frequency.shift();
           frequency[MAX_QUADS-1] = old_freq;
-        }
+          let oldStartTime = startTime.shift();
+          startTime[MAX_QUADS-1] = 0;
+        } */
         return newquad
       }
 
-      // DELME COMMENT
-      // Navin - event listener added to session
+      // Function to display the flower at the specified position.
+      function displayFlowerAt(matrix) {
+        flower.visible = true;
+        flower.matrix = matrix;
+      }
+
+      // Event listener added to session
       // This in turn adds the ARObject quad
       function onSelect(event) {
-        if (reticle.visible) {
+        if (reticle.visible && quads.length <= MAX_QUADS) {
           // The reticle should already be positioned at the latest hit point, 
           // so we can just use it's matrix to save an unnecessary call to 
           // event.frame.getHitTestResults.
+          // Quads are added only before integration start time
+          // as reticles are not rendered afer that
           quad = addARObjectAt(reticle.matrix);
-          quad.light = map_light;
-          map_light = null;
-
-          ws_global.send( `MAPPED: ${quad.light}` )
         }
       }
 
@@ -224,7 +229,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
         // If we have a hit test source, get its results for the frame
         // and use the pose to display a reticle in the scene.
-        if (xrHitTestSource && pose) {
+        // Reticle is visible only before the integration time starts (i.e. during selection time)
+        if (xrHitTestSource && pose && integrationStartTime == 0) {
           let hitTestResults = frame.getHitTestResults(xrHitTestSource);
           if (hitTestResults.length > 0) {
             let pose = hitTestResults[0].getPose(xrRefSpace);
@@ -239,19 +245,51 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
         scene.drawXRFrame(frame, pose);
 
-        // blink quads
-        quads.forEach(function(quad, i) {
-          if (!startTime[i]) { startTime[i] = t; }
-            const elapsed = t - startTime[i];
-            const interval = Math.floor(1000/frequency[i]);   
-            if (elapsed > interval) {
-              startTime[i] = t;
-              index[i] = ++(index[i])%2;
-              quad.visible = visibility[index[i]];
+        // Selection of spatial location by user before SSVEP starts
+        if(!integrationStartTime) {
+          if (quads.length == MAX_QUADS) {
+            integrationStartTime = t;
+          }
+          /* quads.forEach(function(quad, i) {
+            if (!startTime[i]) { startTime[i] = t; }
+            if (!firstQuadSelectStartTime) { firstQuadSelectStartTime = startTime[0]}
+            if(startTime[0] && ((t-firstQuadSelectStartTime) > selectionTime)) { 
+              integrationStartTime = t;
             }
-        })
+          }) */
+        }
+        // after selection time is expired (which is equivalent to selecting 4 quads on the AR scene)
+        else {
+          // Blink quads for runtime
+          if((t - integrationStartTime) < runTime) {
+            quads.forEach(function(quad, i) {
+              const elapsed = t - startTime[i];
+              const interval = Math.floor(1000/frequency[i]);   
+              if (elapsed > interval) {
+                startTime[i] = t;
+                index[i] = ++(index[i])%2;
+                quad.visible = visibility[index[i]];
+              }
+            })
+          }
+          // Once the strobing of quads is done, we send message to SSVEP decoder 
+          // TODO: Work on adding an expiry timer incase startSSVEP decode starts but end flag never gets set
+          else {
+            // send message to ezmsg to start SSVEP decoding
+            if(!startSSVEPDecodeMessageFlag) {
+              // set all quads to invisble after runtime
+              quads.forEach(function(quad, i) {
+                quad.visible = false;
+              })
+              ws_global.send(`COMMAND: START_SSVEP_DECODE`);
+              startSSVEPDecodeMessageFlag = true;
+            }
+          }
+        }
 
-        // Determine closest quad to reticle
+        /* // Determine closest quad to reticle
+        // Navin - This block will be useful later when 
+        // we want to preprocess the location to send
         let closestquadDistance = null;
         let closestquad = null;
         quads.forEach(function(quad, i) {
@@ -273,7 +311,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           sel_quad = closestquad;
           if(!light_mapping)
             ws_global.send(`SELECT: ${sel_quad == null ? "null" : closestquad.light}`);
-        }
+        } */
 
         scene.endFrame();
       }
@@ -287,19 +325,23 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         });
       }
 
-      function on_message( event ) {
+      async function on_message( event ) {
         let tokens = event.data.split( ": " )
         console.log( 'message from ezmsg', tokens )
 
-        if(tokens[0] == 'RESULT'){
-          if(tokens[1] == 'DONE_MAPPING'){
-            light_mapping = false;
-            console.log( 'Done with light mapping' )
-          }
-        }
-        else if(tokens[0] == 'LOCATE'){
-          map_light = tokens[1];
-          console.log( `Locating ${map_light}` )
+        if(tokens[0] == 'CLASS'){
+          // Put a flower on location decoded that corresponds to that frequency for that scene, 
+          // given by quads[tokens[1]].matrix 
+          //console.log( 'token is', tokens[1], 'class decoded in Hz is', frequency[tokens[1]] );
+          // ws_global.send(`STATUS: RECEIVED token is ${tokens[1]}, class decoded is ${frequency[tokens[1]]} Hz`);
+          ws_global.send(`STATUS: Displaying flower at ${quads[tokens[1]].matrix}`);
+          displayFlowerAt(quads[tokens[1]].matrix);
+          await new Promise(ms => setTimeout(ms, flowerDisplayTime));
+          flower.visible = false;
+          //flower.visible = false;
+          startSSVEPDecodeMessageFlag = false;
+          integrationStartTime = 0;
+          quads = [];
         }
       }
 
