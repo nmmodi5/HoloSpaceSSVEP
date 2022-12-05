@@ -93,11 +93,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       let index = [0, 0, 0, 0]; // should be of length MAX_QUADS
       let visibility = [true, false];
       let runTime = 10000; // total time of flashing, in milliseconds
-      let selectionTime = 10000; // wait for first 10 seconds for user to select SSVEP location
+      // let selectionTime = 10000; // wait for first 10 seconds for user to select SSVEP location
       //let firstQuadSelectStartTime = 0 // set only first time 1st quad starts blinking.
-      let integrationStartTime = 0; // set when integration time starts
+      let integrationStartTime = 0; // set to timestamp when integration time starts i.e. last quadrant is selected
       let startSSVEPDecodeMessageFlag = false;
-      let flowerDisplayTime = 2000 // display the flower at decoded location for 2000 ms
+      let flowerDisplayTime = 2000 // display the flower at decoded location for this much time (in ms)
 
       let light_mapping = false;
       let map_light = null;
@@ -260,9 +260,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         }
         // after selection time is expired (which is equivalent to selecting 4 quads on the AR scene)
         else {
-          // Blink quads for runtime
+          // Strobe quads for runtime at the set frequency
           if((t - integrationStartTime) < runTime) {
             quads.forEach(function(quad, i) {
+              if (!startTime[i]) { startTime[i] = t; }
               const elapsed = t - startTime[i];
               const interval = Math.floor(1000/frequency[i]);   
               if (elapsed > interval) {
@@ -334,11 +335,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           // given by quads[tokens[1]].matrix 
           //console.log( 'token is', tokens[1], 'class decoded in Hz is', frequency[tokens[1]] );
           // ws_global.send(`STATUS: RECEIVED token is ${tokens[1]}, class decoded is ${frequency[tokens[1]]} Hz`);
-          ws_global.send(`STATUS: Displaying flower at ${quads[tokens[1]].matrix}`);
+          // ws_global.send(`STATUS: Displaying flower at ${quads[tokens[1]].matrix}`);
           displayFlowerAt(quads[tokens[1]].matrix);
+          // sleep function
           await new Promise(ms => setTimeout(ms, flowerDisplayTime));
           flower.visible = false;
-          //flower.visible = false;
           startSSVEPDecodeMessageFlag = false;
           integrationStartTime = 0;
           quads = [];

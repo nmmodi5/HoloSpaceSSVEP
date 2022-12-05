@@ -59,6 +59,7 @@ class HololightDemo( ez.Unit ):
                             if value == 'START_SSVEP_DECODE':
                                 self.STATE.start_SSVEP_decode = True
                                 logger.info(f'self.STATE.start_SSVEP_decode: {self.STATE.start_SSVEP_decode}')
+                        # currently used only to send debugging statement
                         elif cmd == 'STATUS':
                             logger.info(f'STATUS: {value}')
                         else:
