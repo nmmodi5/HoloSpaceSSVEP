@@ -50,6 +50,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       import {Renderer, createWebGLContext} from './js/render/core/renderer.js';
       import {Node} from './js/render/core/node.js';
       import {Gltf2Node} from './js/render/nodes/gltf2.js';
+      import {ButtonNodeIcon} from './js/render/nodes/button-static.js';
       import {DropShadowNode} from './js/render/nodes/drop-shadow.js';
       import {vec3} from './js/render/math/gl-matrix.js';
       import {Ray} from './js/render/math/ray.js';
@@ -59,6 +60,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       let xrRefSpace = null;
       let xrViewerSpace = null;
       let xrHitTestSource = null;
+      let xrGLFactory = null;
 
       let ws_global;
 
@@ -72,26 +74,34 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       arObject.visible = false;
       scene.addNode(arObject);
 
-      let flower = new Gltf2Node({url: 'assets/reticle.gltf'});
-      vec3.set( flower.scale, 0.5, 0.5, 0.5 );
-      arObject.addNode(flower);
+      let quad = new ButtonNodeIcon();
+      vec3.set(quad.scale, 2, 2, 2);
+      arObject.addNode(quad);
+
+      let flower = new Gltf2Node({url: 'assets/sunflower.gltf'});
+      flower.visible = false;
+      scene.addNode(flower);
 
       let reticle = new Gltf2Node({url: 'assets/reticle.gltf'});
       reticle.visible = false;
       scene.addNode(reticle);
 
-      // Having a really simple drop shadow underneath an object helps ground
-      // it in the world without adding much complexity.
-      let shadow = new DropShadowNode();
-      vec3.set(shadow.scale, 0.15, 0.15, 0.15);
-      arObject.addNode(shadow);
-
-      const MAX_FLOWERS = 30;
-      let flowers = [];
+      const MAX_QUADS = 4;
+      let quads = [];
+      let frequency = [8, 10, 12, 15]; // should be of length MAX_QUADS
+      let startTime = [0, 0, 0, 0]; // should be of length MAX_QUADS
+      let index = [0, 0, 0, 0]; // should be of length MAX_QUADS
+      let visibility = [true, false];
+      let runTime = 10000; // total time of flashing, in milliseconds
+      // let selectionTime = 10000; // wait for first 10 seconds for user to select SSVEP location
+      //let firstQuadSelectStartTime = 0 // set only first time 1st quad starts blinking.
+      let integrationStartTime = 0; // set to timestamp when integration time starts i.e. last quadrant is selected
+      let startSSVEPDecodeMessageFlag = false;
+      let flowerDisplayTime = 2000 // display the flower at decoded location for this much time (in ms)
 
       let light_mapping = false;
       let map_light = null;
-      let sel_flower = null;
+      let sel_quad = null;
 
       // Ensure the background is transparent for AR.
       scene.clear = false;
@@ -136,6 +146,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           scene.setRenderer(renderer);
         }
 
+        xrGLFactory = new XRWebGLBinding(session, gl);
+
         session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
 
         // In this sample we want to cast a ray straight out from the viewer's
@@ -154,10 +166,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
           session.requestAnimationFrame(onXRFrame);
         });
-
-        console.log( "Starting Light Mapping!" );
-        ws_global.send( 'COMMAND: START_MAPPING' );
-        light_mapping = true;
       }
 
       function onEndSession(session) {
@@ -173,34 +181,42 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       // Adds a new object to the scene at the
       // specified transform.
       function addARObjectAt(matrix) {
-        let newFlower = arObject.clone();
-        newFlower.visible = true;
-        newFlower.matrix = matrix;
-        scene.addNode(newFlower);
+        let newquad = arObject.clone();
+        newquad.visible = true;
+        newquad.matrix = matrix;
+        scene.addNode(newquad);
+        quads.push(newquad);
 
-        flowers.push(newFlower);
-
-        // For performance reasons if we add too many objects start
+        /* // For performance reasons if we add too many objects start
         // removing the oldest ones to keep the scene complexity
         // from growing too much.
-        if (flowers.length > MAX_FLOWERS) {
-          let oldFlower = flowers.shift();
-          scene.removeNode(oldFlower);
-        }
-
-        return newFlower
+        if (quads.length > MAX_QUADS) {
+          let oldquad = quads.shift();
+          scene.removeNode(oldquad);
+          let old_freq = frequency.shift();
+          frequency[MAX_QUADS-1] = old_freq;
+          let oldStartTime = startTime.shift();
+          startTime[MAX_QUADS-1] = 0;
+        } */
+        return newquad
       }
 
+      // Function to display the flower at the specified position.
+      function displayFlowerAt(matrix) {
+        flower.visible = true;
+        flower.matrix = matrix;
+      }
+
+      // Event listener added to session
+      // This in turn adds the ARObject quad
       function onSelect(event) {
-        if (reticle.visible && map_light) {
+        if (reticle.visible && quads.length <= MAX_QUADS) {
           // The reticle should already be positioned at the latest hit point, 
           // so we can just use it's matrix to save an unnecessary call to 
           // event.frame.getHitTestResults.
-          flower = addARObjectAt(reticle.matrix);
-          flower.light = map_light;
-          map_light = null;
-
-          ws_global.send( `MAPPED: ${flower.light}` )
+          // Quads are added only before integration start time
+          // as reticles are not rendered afer that
+          quad = addARObjectAt(reticle.matrix);
         }
       }
 
@@ -213,7 +229,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
         // If we have a hit test source, get its results for the frame
         // and use the pose to display a reticle in the scene.
-        if (xrHitTestSource && pose) {
+        // Reticle is visible only before the integration time starts (i.e. during selection time)
+        if (xrHitTestSource && pose && integrationStartTime == 0) {
           let hitTestResults = frame.getHitTestResults(xrHitTestSource);
           if (hitTestResults.length > 0) {
             let pose = hitTestResults[0].getPose(xrRefSpace);
@@ -228,29 +245,74 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
         scene.drawXRFrame(frame, pose);
 
-        // Determine closest flower to reticle
-        let closestFlowerDistance = null;
-        let closestFlower = null;
-        flowers.forEach(function(flower, i) {
+        // Selection of spatial location by user before SSVEP starts
+        if(!integrationStartTime) {
+          if (quads.length == MAX_QUADS) {
+            integrationStartTime = t;
+          }
+          /* quads.forEach(function(quad, i) {
+            if (!startTime[i]) { startTime[i] = t; }
+            if (!firstQuadSelectStartTime) { firstQuadSelectStartTime = startTime[0]}
+            if(startTime[0] && ((t-firstQuadSelectStartTime) > selectionTime)) { 
+              integrationStartTime = t;
+            }
+          }) */
+        }
+        // after selection time is expired (which is equivalent to selecting 4 quads on the AR scene)
+        else {
+          // Strobe quads for runtime at the set frequency
+          if((t - integrationStartTime) < runTime) {
+            quads.forEach(function(quad, i) {
+              if (!startTime[i]) { startTime[i] = t; }
+              const elapsed = t - startTime[i];
+              const interval = Math.floor(1000/frequency[i]);   
+              if (elapsed > interval) {
+                startTime[i] = t;
+                index[i] = ++(index[i])%2;
+                quad.visible = visibility[index[i]];
+              }
+            })
+          }
+          // Once the strobing of quads is done, we send message to SSVEP decoder 
+          // TODO: Work on adding an expiry timer incase startSSVEP decode starts but end flag never gets set
+          else {
+            // send message to ezmsg to start SSVEP decoding
+            if(!startSSVEPDecodeMessageFlag) {
+              // set all quads to invisble after runtime
+              quads.forEach(function(quad, i) {
+                quad.visible = false;
+              })
+              ws_global.send(`COMMAND: START_SSVEP_DECODE`);
+              startSSVEPDecodeMessageFlag = true;
+            }
+          }
+        }
+
+        /* // Determine closest quad to reticle
+        // Navin - This block will be useful later when 
+        // we want to preprocess the location to send
+        let closestquadDistance = null;
+        let closestquad = null;
+        quads.forEach(function(quad, i) {
 
           let distance = Math.hypot(
-            reticle.matrix[12] - flower.matrix[12],
-            reticle.matrix[13] - flower.matrix[13],
-            reticle.matrix[14] - flower.matrix[14],
+            reticle.matrix[12] - quad.matrix[12],
+            reticle.matrix[13] - quad.matrix[13],
+            reticle.matrix[14] - quad.matrix[14],
           )
 
           if (distance <= 0.33)
-            if (closestFlower == null || closestFlowerDistance > distance) { 
-              closestFlower = flower;
-              closestFlowerDistance = distance;
+            if (closestquad == null || closestquadDistance > distance) { 
+              closestquad = quad;
+              closestquadDistance = distance;
             }
         })
 
-        if (closestFlower != sel_flower) {
-          sel_flower = closestFlower;
+        if (closestquad != sel_quad) {
+          sel_quad = closestquad;
           if(!light_mapping)
-            ws_global.send(`SELECT: ${sel_flower == null ? "null" : closestFlower.light}`);
-        }
+            ws_global.send(`SELECT: ${sel_quad == null ? "null" : closestquad.light}`);
+        } */
 
         scene.endFrame();
       }
@@ -264,19 +326,23 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         });
       }
 
-      function on_message( event ) {
+      async function on_message( event ) {
         let tokens = event.data.split( ": " )
         console.log( 'message from ezmsg', tokens )
 
-        if(tokens[0] == 'RESULT'){
-          if(tokens[1] == 'DONE_MAPPING'){
-            light_mapping = false;
-            console.log( 'Done with light mapping' )
-          }
-        }
-        else if(tokens[0] == 'LOCATE'){
-          map_light = tokens[1];
-          console.log( `Locating ${map_light}` )
+        if(tokens[0] == 'CLASS'){
+          // Put a flower on location decoded that corresponds to that frequency for that scene, 
+          // given by quads[tokens[1]].matrix 
+          //console.log( 'token is', tokens[1], 'class decoded in Hz is', frequency[tokens[1]] );
+          // ws_global.send(`STATUS: RECEIVED token is ${tokens[1]}, class decoded is ${frequency[tokens[1]]} Hz`);
+          // ws_global.send(`STATUS: Displaying flower at ${quads[tokens[1]].matrix}`);
+          displayFlowerAt(quads[tokens[1]].matrix);
+          // sleep function
+          await new Promise(ms => setTimeout(ms, flowerDisplayTime));
+          flower.visible = false;
+          startSSVEPDecodeMessageFlag = false;
+          integrationStartTime = 0;
+          quads = [];
         }
       }
 

@@ -4,8 +4,6 @@ import ssl
 import logging
 import traceback
 
-from phue import Bridge, Light
-
 from pathlib import Path
 
 import ezmsg.core as ez
@@ -24,19 +22,14 @@ logger = logging.getLogger( __name__ )
 
 class HololightDemoSettings( ez.Settings ):
     cert: Path
-    bridge_host: str
     host: str = '0.0.0.0'
     port: int = 8081
     ws_port: int = 8082
-    trigger_class: int = 1
-    trigger_thresh: float = 0.9
-
 
 class HololightDemoState( ez.State ):
-    focus_light: Optional[ str ] = None
     decode_class: Optional[ int ] = None
-    bridge: Optional[ Bridge ] = None
-
+    new_decoded_op: Optional[ bool ] = None
+    start_SSVEP_decode: Optional[ bool ] = None
 
 class HololightDemo( ez.Unit ):
 
@@ -47,14 +40,9 @@ class HololightDemo( ez.Unit ):
 
     def initialize( self ) -> None:
         try:
-            bridge = Bridge( self.SETTINGS.bridge_host )
-            bridge.connect()
-            lights: List[ Light ] = bridge.lights
-            for light in lights:
-                light.on = False
-            self.STATE.bridge = bridge
+            logger.info(f'initialize is empty for now !')
         except:
-            logger.warn( f'Failed to connect to bridge. Traceback follows:\n{traceback.format_exc()}' )
+            logger.warn( f'Failed to connect. Traceback follows:\n{traceback.format_exc()}' )
 
     @ez.task
     async def start_websocket_server( self ) -> None:
@@ -62,53 +50,26 @@ class HololightDemo( ez.Unit ):
         async def connection( websocket: websockets.server.WebSocketServerProtocol, path ):
             logger.info( 'Client Connected to Websocket Input' )
 
-            async def blink_light( light: Light ) -> None:
-                while True:
-                    await asyncio.sleep( 1.0 )
-                    light.on = not light.on
-
             try:
                 while True:
-                    data = await websocket.recv()
-
-                    cmd, value = data.split( ': ' )
-
-                    if cmd == 'COMMAND':
-
-                        if value == 'START_MAPPING': # Perform Spatial Light Mapping
-                            logger.info( 'Starting Light Mapping Sequence...' )
-                            if self.STATE.bridge:
-                                lights: List[ Light ] = self.STATE.bridge.lights
-                                for light in lights:
-                                    if not light.reachable: continue
-
-                                    logger.info( f'Asking client to locate {light.name}' )
-                                    await websocket.send( f'LOCATE: {light.name}' )
-
-                                    blink_task = asyncio.create_task( blink_light( light ) )
-                                    data = await websocket.recv() # Echo Light Name
-                                    logger.info( f'Client responds {data}' )
-                                    blink_task.cancel()
-                                
-                                logger.info( 'Light Mapping Sequence Complete' )
-                            else:
-                                logger.info( 'No bridge connected; light mapping cancelled' )
-
-                                ## DEBUG
-                                # logger.info( 'No bridge connected; testing with two bulbs')
-                                # for light in [ 'test1', 'test2' ]:
-                                #     await websocket.send( f'LOCATE: {light}' )
-                                #     data = await websocket.recv()
-                                #     logger.info( f'Client responds {data}' )
-
-                            await websocket.send( 'RESULT: DONE_MAPPING' )
-
-                    elif cmd == 'SELECT': # Select/Focus a light
-                        self.STATE.focus_light = value if value != 'null' else None
-                        logger.info( f'Client focusing light {self.STATE.focus_light}' )
-
+                    if (not self.STATE.start_SSVEP_decode) :
+                        data = await websocket.recv()
+                        cmd, value = data.split( ': ' )
+                        if cmd == 'COMMAND':
+                            if value == 'START_SSVEP_DECODE':
+                                self.STATE.start_SSVEP_decode = True
+                                logger.info(f'self.STATE.start_SSVEP_decode: {self.STATE.start_SSVEP_decode}')
+                        # currently used only to send debugging statement
+                        elif cmd == 'STATUS':
+                            logger.info(f'STATUS: {value}')
+                        else:
+                            logger.info( f'Received problematic message from websocket client: {data}')
                     else:
-                        logger.info( 'Received problematic message from websocket client: {data}')
+                        if (self.STATE.new_decoded_op):
+                            await websocket.send(f'CLASS: {self.STATE.decode_class[0]}')
+                            self.STATE.new_decoded_op = None
+                            logger.info( f'ws: sent {self.STATE.decode_class[0]}' )
+                            self.STATE.start_SSVEP_decode = None
 
             except ( websockets.exceptions.ConnectionClosed ):
                 logger.info( 'Websocket Client Closed Connection' )
@@ -138,28 +99,15 @@ class HololightDemo( ez.Unit ):
         finally:
             logger.info( 'Closing Websocket Server' )
 
-
+    ## action to be taken on decoding the input
     @ez.subscriber( INPUT_DECODE )
     async def on_decode( self, decode: ClassDecodeMessage ) -> None:
-
         cur_class = decode.data.argmax( axis = decode.class_dim )
         cur_prob = decode.data[ :, cur_class ]
 
-        logger.info( f'Decoder: {cur_class} @ {cur_prob}' )
-
-        if self.STATE.decode_class is None:
-            self.STATE.decode_class = cur_class
-
-        if cur_class != self.STATE.decode_class:
-            if cur_prob > self.SETTINGS.trigger_thresh:
-                self.STATE.decode_class = cur_class
-                if cur_class == self.SETTINGS.trigger_class:
-                    if self.STATE.focus_light is not None and self.STATE.bridge:
-                        try:
-                            light: Light = self.STATE.bridge.lights_by_name[ self.STATE.focus_light ]
-                            light.on = not light.on
-                        except KeyError:
-                            logger.warn( f'Light {self.STATE.focus_light} does not exist.' )
+        self.STATE.decode_class = cur_class
+        self.STATE.new_decoded_op = [True]
+        #logger.info( f'self.STATE.decode_class {self.STATE.decode_class}' )
 
     @ez.main
     def serve( self ):
@@ -186,18 +134,22 @@ class HololightDemo( ez.Unit ):
 ### DEV/TEST APPARATUS
 
 class GenerateDecodeOutput( ez.Unit ):
-
+    ### ClassDecodeMessage gets the decoded message
     OUTPUT_DECODE = ez.OutputStream( ClassDecodeMessage )
 
     @ez.publisher( OUTPUT_DECODE )
     async def generate( self ) -> AsyncGenerator:
-        output = np.array( [ [ True, False ] ] )
+        ## Assuming the actual outputs intended are [8], [10], [12], [15]
+        ## output is one hot encoding for each decoded frequency output
+        ## Note: In actuality we may have something like [8, 8, 8, 10, 8, 8, 10]
+        ## for each intended output and we need to do one-hot encoding of output accordingly
+        output = np.array( [ [ 1, 0, 0, 0 ] ] )
         while True:
             out = ( output.astype( float ) * 0.9 ) + 0.05
             out /= out.sum()
             yield self.OUTPUT_DECODE, ClassDecodeMessage( data = out, fs = 0.5 )
             await asyncio.sleep( 2.0 )
-            output = ~output
+            output = np.roll(output, 1)
 
 class HololightTestSystem( ez.System ):
 
@@ -223,12 +175,6 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
-        '--bridge',
-        type = str,
-        help = 'Hostname for Philips Hue Bridge'
-    )
-
-    parser.add_argument(
         '--cert',
         type = lambda x: Path( x ),
         help = "Certificate file for frontend server",
@@ -236,13 +182,10 @@ if __name__ == '__main__':
     )
 
     args = parser.parse_args()
-
-    bridge_host: str = args.bridge
     cert: Path = args.cert
 
     settings = HololightDemoSettings(
-        cert = cert,
-        bridge_host = bridge_host
+        cert = cert
     )
 
     system = HololightTestSystem( settings )
